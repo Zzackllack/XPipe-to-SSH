@@ -1,7 +1,7 @@
 [project]
 name = "xpipe-to-ssh"
-version = "0.1.0"
-description = "Add your description here"
+version = "1.0.0"
+description = "Convert an in XPipe configured connection to a SSH command."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
