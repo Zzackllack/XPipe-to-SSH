@@ -19,7 +19,10 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 try:
@@ -34,6 +37,13 @@ UUID_RE = re.compile(
 
 class ExportError(RuntimeError):
     pass
+
+
+@dataclass
+class SSHCommand:
+    argv: list[str]
+    env: dict[str, str] = field(default_factory=dict)
+    needs_password_manager_agent: bool = False
 
 
 def warn(message: str) -> None:
@@ -82,6 +92,36 @@ def connection_config(info: dict[str, Any]) -> dict[str, Any]:
         if isinstance(value, dict):
             return value
     return {}
+
+
+def selected_value(value: Any) -> Any:
+    """Unwrap XPipe selectable values such as {value: ..., available: [...]}.
+
+    Recent XPipe schemas wrap fields like SSH hosts in an object containing the
+    currently selected value and the list of discovered alternatives.
+    """
+    seen: set[int] = set()
+    while isinstance(value, dict) and id(value) not in seen:
+        seen.add(id(value))
+        if "value" in value:
+            value = value.get("value")
+            continue
+        if "selected" in value:
+            value = value.get("selected")
+            continue
+        break
+    return value
+
+
+def selected_text(value: Any) -> str | None:
+    """Return a selected scalar value as text, or None for non-scalars."""
+    value = selected_value(value)
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (str, int, float)):
+        text = str(value).strip()
+        return text or None
+    return None
 
 
 def choose_connection(client: Client, selector: str) -> dict[str, Any]:
@@ -178,21 +218,25 @@ def decrypt_json(client: Client, encrypted: Any) -> Any:
         return raw
 
 
-def identity_options(client: Client, cfg: dict[str, Any]) -> list[str]:
+def identity_options(client: Client, cfg: dict[str, Any]) -> tuple[list[str], bool]:
     options: list[str] = []
+    needs_password_manager_agent = False
     store = resolve_identity(client, cfg.get("identity"))
     if not store:
-        return options
+        return options, needs_password_manager_agent
 
-    username = store.get("username")
+    username = selected_text(store.get("username"))
     if username:
-        options += ["-l", str(username)]
+        options += ["-l", username]
 
     key_data = decrypt_json(client, store.get("sshIdentity"))
     if isinstance(key_data, dict):
-        key_type = key_data.get("type")
-        if key_type == "file" and key_data.get("file"):
-            options += ["-i", os.path.expanduser(str(key_data["file"]))]
+        key_type = selected_text(key_data.get("type"))
+        key_file = selected_text(key_data.get("file"))
+        if key_type == "file" and key_file:
+            options += ["-i", os.path.expanduser(key_file)]
+        elif key_type and key_type.casefold() == "passwordmanageragent":
+            needs_password_manager_agent = True
         elif key_type not in (None, "none", "agent"):
             warn(
                 f"SSH key type {key_type!r} cannot always be represented by plain OpenSSH; "
@@ -204,7 +248,7 @@ def identity_options(client: Client, cfg: dict[str, Any]) -> list[str]:
     if store.get("password"):
         warn("XPipe-managed password was not exported; ssh may prompt for it")
 
-    return options
+    return options, needs_password_manager_agent
 
 
 def additional_options(raw: Any) -> list[str]:
@@ -229,9 +273,9 @@ def additional_options(raw: Any) -> list[str]:
 
 def ssh_config_alias(info: dict[str, Any], cfg: dict[str, Any]) -> str:
     for key in ("alias", "host", "hostName", "name"):
-        value = cfg.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+        value = selected_text(cfg.get(key))
+        if value:
+            return value
     path = display_path(info)
     if path:
         return path.split("/")[-1]
@@ -244,7 +288,7 @@ def build_ssh_argv(
     *,
     proxy_mode: bool = False,
     visited: set[str] | None = None,
-) -> list[str]:
+) -> SSHCommand:
     visited = set() if visited is None else set(visited)
     ref = str(info.get("connection") or "")
     if ref:
@@ -260,35 +304,47 @@ def build_ssh_argv(
         if proxy_mode:
             argv += ["-W", "%h:%p"]
         argv.append(ssh_config_alias(info, cfg))
-        return argv
+        return SSHCommand(argv)
 
     if cfg.get("type") != "ssh" and connection_type != "ssh":
         raise ExportError(
             f"{display_path(info)!r} is type {connection_type!r}, not a directly exportable SSH connection"
         )
 
-    host = cfg.get("host")
+    host = selected_text(cfg.get("host"))
     if not host:
-        raise ExportError(f"{display_path(info)!r} has no SSH host")
+        raw_host = cfg.get("host")
+        raise ExportError(
+            f"{display_path(info)!r} has no usable SSH host "
+            f"(raw value: {raw_host!r})"
+        )
 
     argv = ["ssh"]
-    port = cfg.get("port")
-    if port and int(port) != 22:
-        argv += ["-p", str(port)]
+    port = selected_text(cfg.get("port"))
+    if port:
+        try:
+            port_number = int(port)
+        except ValueError as exc:
+            raise ExportError(f"Invalid SSH port {port!r}") from exc
+        if port_number != 22:
+            argv += ["-p", str(port_number)]
 
-    argv += identity_options(client, cfg)
+    identity_argv, needs_agent = identity_options(client, cfg)
+    argv += identity_argv
 
     if cfg.get("forwardX11"):
         argv.append("-X")
 
     argv += additional_options(cfg.get("additionalOptions"))
 
-    gateway_ref = cfg.get("gateway")
+    gateway_ref = selected_text(cfg.get("gateway"))
     if gateway_ref:
-        gateway_info = info_one(client, str(gateway_ref))
-        gateway_argv = build_ssh_argv(
+        gateway_info = info_one(client, gateway_ref)
+        gateway_command = build_ssh_argv(
             client, gateway_info, proxy_mode=True, visited=visited
         )
+        needs_agent = needs_agent or gateway_command.needs_password_manager_agent
+        gateway_argv = gateway_command.argv
         # ProxyCommand rather than -J preserves per-gateway usernames, ports,
         # key files, extra options, and arbitrarily deep gateway chains.
         argv += ["-o", f"ProxyCommand={shlex.join(gateway_argv)}"]
@@ -296,8 +352,8 @@ def build_ssh_argv(
     if proxy_mode:
         argv += ["-W", "%h:%p"]
 
-    argv.append(str(host))
-    return argv
+    argv.append(host)
+    return SSHCommand(argv, needs_password_manager_agent=needs_agent)
 
 
 def powershell_join(argv: list[str]) -> str:
@@ -309,14 +365,89 @@ def powershell_join(argv: list[str]) -> str:
     return " ".join(quote(arg) for arg in argv)
 
 
-def render(argv: list[str], shell: str) -> str:
+def candidate_agent_sockets() -> list[Path]:
+    home = Path.home()
+    candidates = [
+        # Bitwarden desktop downloaded from bitwarden.com
+        home / ".bitwarden-ssh-agent.sock",
+        # Bitwarden from the macOS App Store
+        home
+        / "Library/Containers/com.bitwarden.desktop/Data/.bitwarden-ssh-agent.sock",
+        # 1Password, in case XPipe's generic passwordManagerAgent type refers to it
+        home / "Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock",
+    ]
+    current = os.environ.get("SSH_AUTH_SOCK")
+    if current:
+        candidates.append(Path(os.path.expandvars(os.path.expanduser(current))))
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        text = str(candidate)
+        if text not in seen:
+            seen.add(text)
+            unique.append(candidate)
+    return unique
+
+
+def agent_has_identities(socket_path: Path) -> bool:
+    try:
+        result = subprocess.run(
+            ["ssh-add", "-L"],
+            env={**os.environ, "SSH_AUTH_SOCK": str(socket_path)},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def resolve_agent_socket(requested: str) -> str | None:
+    if requested == "none":
+        return None
+    if requested != "auto":
+        path = Path(os.path.expandvars(os.path.expanduser(requested)))
+        if not path.exists():
+            raise ExportError(f"SSH agent socket does not exist: {path}")
+        return str(path)
+
+    candidates = candidate_agent_sockets()
+    for candidate in candidates:
+        if candidate.exists() and agent_has_identities(candidate):
+            return str(candidate)
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def render(command: SSHCommand, shell: str) -> str:
+    argv = command.argv
+    env = command.env
     if shell == "auto":
         shell = "powershell" if os.name == "nt" else "posix"
-    if shell == "powershell":
-        return powershell_join(argv)
     if shell == "json":
-        return json.dumps(argv, indent=2)
-    return shlex.join(argv)
+        return json.dumps({"env": env, "argv": argv}, indent=2)
+    if shell == "powershell":
+        rendered = powershell_join(argv)
+        if env:
+            prefix = "; ".join(
+                f"$env:{key}={powershell_join([value])}" for key, value in env.items()
+            )
+            return f"{prefix}; {rendered}"
+        return rendered
+
+    rendered = shlex.join(argv)
+    if env:
+        # VAR=value command changes the environment only for this SSH process.
+        # This is safer and more composable than `export VAR=value; command`.
+        prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
+        return f"{prefix} {rendered}"
+    return rendered
 
 
 def main() -> int:
@@ -335,6 +466,20 @@ def main() -> int:
     )
     parser.add_argument(
         "--ptb", action="store_true", help="connect to an XPipe PTB build"
+    )
+    parser.add_argument(
+        "--agent-socket",
+        default="auto",
+        metavar="PATH",
+        help=(
+            "SSH agent socket for passwordManagerAgent identities; "
+            "default: auto-detect Bitwarden/1Password, or use 'none'"
+        ),
+    )
+    parser.add_argument(
+        "--connect",
+        action="store_true",
+        help="run ssh directly instead of printing the command",
     )
     args = parser.parse_args()
 
@@ -358,8 +503,23 @@ def main() -> int:
             parser.error("provide a connection name/UUID, or use --list")
 
         info = choose_connection(client, args.connection)
-        argv = build_ssh_argv(client, info)
-        print(render(argv, args.shell))
+        command = build_ssh_argv(client, info)
+
+        if command.needs_password_manager_agent:
+            socket_path = resolve_agent_socket(args.agent_socket)
+            if socket_path:
+                command.env["SSH_AUTH_SOCK"] = socket_path
+            else:
+                warn(
+                    "connection uses a password-manager SSH agent, but no usable "
+                    "agent socket was found; pass --agent-socket PATH"
+                )
+
+        if args.connect:
+            env = {**os.environ, **command.env}
+            os.execvpe(command.argv[0], command.argv, env)
+
+        print(render(command, args.shell))
         return 0
     except ExportError as exc:
         print(f"error: {exc}", file=sys.stderr)
