@@ -36,13 +36,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-# xpipe-api currently imports an asyncio dependency that expects an event loop
-# to exist at import time. Python 3.14 no longer creates one implicitly.
-try:
-    asyncio.get_event_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
-
+# xpipe-api imports a dependency that expects an event loop at import time.
+_XPIPE_IMPORT_LOOP = asyncio.new_event_loop()
+asyncio.set_event_loop(_XPIPE_IMPORT_LOOP)
 try:
     from xpipe_api import Client
 except ImportError:
