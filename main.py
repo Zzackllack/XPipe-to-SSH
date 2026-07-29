@@ -1,4 +1,4 @@
-!/usr/bin/env python3
+#!/usr/bin/env python3
 """Turn an XPipe SSH connection into a usable OpenSSH command.
 
 Features:
@@ -63,8 +63,7 @@ except ImportError:
 
 
 UUID_RE = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-" r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 
 
@@ -224,12 +223,16 @@ def choose_connection(client: Client, selector: str) -> dict[str, Any]:
     ]
 
     if not matches:
-        raise ExportError(f"No SSH connection matched {selector!r}. Use --list to see names.")
+        raise ExportError(
+            f"No SSH connection matched {selector!r}. Use --list to see names."
+        )
     if len(matches) > 1:
         names = "\n  ".join(
             f"{display_path(info)}  [{info.get('connection')}]" for info in matches[:20]
         )
-        raise ExportError(f"Connection name is ambiguous. Use a full path or UUID:\n  {names}")
+        raise ExportError(
+            f"Connection name is ambiguous. Use a full path or UUID:\n  {names}"
+        )
     return matches[0]
 
 
@@ -457,7 +460,10 @@ def build_ssh_argv(
         )
         needs_agent = needs_agent or gateway_command.needs_password_manager_agent
         warnings.extend(gateway_command.warnings)
-        gateway_names = [gateway_command.connection_name, *gateway_command.gateway_names]
+        gateway_names = [
+            gateway_command.connection_name,
+            *gateway_command.gateway_names,
+        ]
         argv += ["-o", f"ProxyCommand={shlex.join(gateway_command.argv)}"]
 
     if proxy_mode:
@@ -503,7 +509,8 @@ def candidate_agent_sockets() -> list[Path]:
     home = Path.home()
     candidates = [
         home / ".bitwarden-ssh-agent.sock",
-        home / "Library/Containers/com.bitwarden.desktop/Data/.bitwarden-ssh-agent.sock",
+        home
+        / "Library/Containers/com.bitwarden.desktop/Data/.bitwarden-ssh-agent.sock",
         home / "Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock",
     ]
     current = os.environ.get("SSH_AUTH_SOCK")
@@ -639,7 +646,9 @@ def render_address_table(command: SSHCommand) -> Any:
 
     for host in command.available_hosts:
         if host == command.selected_host:
-            table.add_row("[bold green]Selected[/]", f"[bold]{host}[/]", address_kind(host))
+            table.add_row(
+                "[bold green]Selected[/]", f"[bold]{host}[/]", address_kind(host)
+            )
         else:
             table.add_row("[cyan]Available[/]", host, address_kind(host))
     return table
@@ -824,7 +833,9 @@ def copy_to_clipboard(text: str) -> str:
     else:
         if os.environ.get("WAYLAND_DISPLAY"):
             commands.append(["wl-copy"])
-        commands.extend([["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]])
+        commands.extend(
+            [["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
+        )
 
     for command in commands:
         if shutil.which(command[0]):
@@ -845,7 +856,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Export an XPipe SSH connection as one OpenSSH command"
     )
-    parser.add_argument("connection", nargs="?", help="connection name/path or XPipe UUID")
+    parser.add_argument(
+        "connection", nargs="?", help="connection name/path or XPipe UUID"
+    )
     parser.add_argument("--list", action="store_true", help="list SSH connections")
     parser.add_argument(
         "--shell",
@@ -853,7 +866,9 @@ def main() -> int:
         default="auto",
         help="command quoting format (default: auto)",
     )
-    parser.add_argument("--ptb", action="store_true", help="connect to an XPipe PTB build")
+    parser.add_argument(
+        "--ptb", action="store_true", help="connect to an XPipe PTB build"
+    )
     parser.add_argument(
         "--agent-socket",
         default="auto",
@@ -1004,4 +1019,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
