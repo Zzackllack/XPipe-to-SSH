@@ -1,7 +1,8 @@
 # XPipe 24 compatibility audit
 
-Status: the current script is not compatible with the XPipe 24 API as shipped
-in the local XPipe Community 24.1.1 installation.
+Status: the compatibility fix is implemented and live-verified against the
+local XPipe Community 24.1.1 installation. The original audit findings remain
+below as the rationale and regression checklist.
 
 This audit covers the XPipe 23.9 baseline and every published 24.x changelog
 available on 2026-09-09: 24.0, 24.0.1, 24.0.2, 24.0.3, 24.0.4, 24.0.5,
@@ -10,9 +11,10 @@ XPipe `master` branch, but there is no published 24.1.2 release or tag yet;
 that file only repeats an artifact-download fix and does not change this
 assessment.
 
-## Executive result
+## Original audit result
 
-The tool currently fails before it can discover a connection:
+Before the compatibility fix, the tool failed before it could discover a
+connection:
 
 ```text
 uv run python main.py --list --plain
@@ -22,17 +24,23 @@ uv run python main.py oracle-oc1 --plain
 error: No SSH connection matched 'oracle-oc1'. Use --list to see names.
 ```
 
-The empty `--list` result is misleading. `query_all()` catches every query
-exception and silently continues (`main.py:130-141`). XPipe 24.1.1 is
+The empty `--list` result was misleading. `query_all()` caught every query
+exception and silently continued (`main.py:130-141`). XPipe 24.1.1 was
 actually rejecting the old request with:
 
 ```text
 500 ... /connection/query: ... storeFilter is marked non-null but is null
 ```
 
-The local XPipe UI reports `XPipe Community (24.1.1)`, and its daemon API
-reports version `24.1.1`. A direct call through the current locked dependency
-(`xpipe-api` 0.1.33) reproduces the failure.
+The local XPipe UI and daemon API reported version `24.1.1`. A direct call
+through the then-locked dependency (`xpipe-api` 0.1.33) reproduced the
+failure.
+
+The fixed implementation now uses `store_query`/`store_info`, reads v24
+`store` identifiers, recognizes direct identity descriptors before attempting
+secret decryption, and surfaces API errors. Live testing against the same
+daemon listed 15 SSH/SSH-config stores and successfully generated structured
+commands for all 15 by store UUID.
 
 ## Confirmed breaking changes
 
@@ -133,7 +141,8 @@ the active XPipe instance.
 ## Recommended compatibility work
 
 1. Pin the Python API to a v24-compatible release (`xpipe-api>=0.1.34`,
-   preferably the tested current release) and regenerate `uv.lock`.
+   preferably the tested current release) and regenerate `uv.lock`. **Done:**
+   the lock now uses 0.1.35.
 2. Replace `connection_query`/`connection_info` with `store_query`/`store_info`
    and use the v24 request/response field names.
 3. Read the store identifier from `store`, with a temporary `connection`
@@ -148,6 +157,8 @@ the active XPipe instance.
    a host with alternatives, a gateway, a file key, and a password-manager
    agent. Verify both `--plain` and `--shell json`, including the store ID and
    `SSH_AUTH_SOCK` behavior.
+
+Items 2–6 are implemented or covered by regression tests in `test_main.py`.
 
 ## Evidence and sources
 

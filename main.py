@@ -32,9 +32,10 @@ import shlex
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 # xpipe-api imports a dependency that expects an event loop at import time.
 _XPIPE_IMPORT_LOOP = asyncio.new_event_loop()
@@ -113,8 +114,24 @@ def unique_text(values: Iterable[Any]) -> list[str]:
     return result
 
 
+def api_method(client: Client, *names: str) -> Any:
+    """Return the first API method supported by the installed client."""
+    for name in names:
+        method = getattr(client, name, None)
+        if callable(method):
+            return method
+    supported = ", ".join(names)
+    raise ExportError(f"Installed xpipe-api does not provide any of: {supported}")
+
+
+def store_id(info: dict[str, Any]) -> str:
+    """Return the v24 store ID, with a v23 connection-ID fallback."""
+    value = info.get("store") or info.get("connection")
+    return str(value) if value else ""
+
+
 def info_one(client: Client, ref: str) -> dict[str, Any]:
-    values = client.connection_info([ref])
+    values = api_method(client, "store_info", "connection_info")([ref])
     if not values:
         raise ExportError(f"XPipe returned no information for {ref}")
     return values[0]
@@ -128,25 +145,27 @@ def display_path(info: dict[str, Any]) -> str:
 
 
 def query_all(client: Client) -> list[dict[str, Any]]:
-    refs: list[str] = []
-    seen: set[str] = set()
-    for pattern in ("**", "*", "**/*"):
-        try:
-            for ref in client.connection_query(connections=pattern):
-                if ref not in seen:
-                    seen.add(ref)
-                    refs.append(ref)
-        except Exception:
-            pass
-    return client.connection_info(refs) if refs else []
+    if callable(getattr(client, "store_query", None)):
+        refs = client.store_query(categories="**", stores="**", types="*")
+    else:
+        refs = api_method(client, "connection_query")(connections="**")
+
+    if not refs:
+        return []
+    return api_method(client, "store_info", "connection_info")(
+        list(dict.fromkeys(refs))
+    )
 
 
 def connection_config(info: dict[str, Any]) -> dict[str, Any]:
-    """Return the connection schema across XPipe API field-name versions."""
-    keys = ("config", "rawData", "data")
+    """Return the store schema across XPipe API field-name versions."""
+    keys = ("rawData", "config", "data")
     for key in keys:
         value = info.get(key)
         if isinstance(value, dict) and value:
+            nested = value.get("config")
+            if isinstance(nested, dict) and nested:
+                return nested
             return value
     for key in keys:
         value = info.get(key)
@@ -224,7 +243,7 @@ def choose_connection(client: Client, selector: str) -> dict[str, Any]:
         )
     if len(matches) > 1:
         names = "\n  ".join(
-            f"{display_path(info)}  [{info.get('connection')}]" for info in matches[:20]
+            f"{display_path(info)}  [{store_id(info)}]" for info in matches[:20]
         )
         raise ExportError(
             f"Connection name is ambiguous. Use a full path or UUID:\n  {names}"
@@ -291,6 +310,16 @@ def decrypt_json(client: Client, encrypted: Any, warnings: list[str]) -> Any:
         return raw
 
 
+def decode_identity_data(client: Client, value: Any, warnings: list[str]) -> Any:
+    """Decode v23 encrypted identity data or return a v24 descriptor directly."""
+    if isinstance(value, dict):
+        descriptor_type = value.get("type")
+        encrypted_keys = {"secrets", "encryptedValue", "encryptedToken"}
+        if isinstance(descriptor_type, str) and not encrypted_keys.intersection(value):
+            return value
+    return decrypt_json(client, value, warnings)
+
+
 def identity_options(client: Client, cfg: dict[str, Any]) -> IdentityResult:
     result = IdentityResult()
     store = resolve_identity(client, cfg.get("identity"), result.warnings)
@@ -302,7 +331,7 @@ def identity_options(client: Client, cfg: dict[str, Any]) -> IdentityResult:
     if result.username:
         result.argv += ["-l", result.username]
 
-    key_data = decrypt_json(client, store.get("sshIdentity"), result.warnings)
+    key_data = decode_identity_data(client, store.get("sshIdentity"), result.warnings)
     if isinstance(key_data, dict):
         key_type = selected_text(key_data.get("type"))
         key_file = selected_text(key_data.get("file"))
@@ -362,6 +391,12 @@ def ssh_config_alias(info: dict[str, Any], cfg: dict[str, Any]) -> str:
         value = selected_text(cfg.get(key))
         if value:
             return value
+    host_entry = cfg.get("hostEntry")
+    if isinstance(host_entry, dict):
+        for key in ("name", "alias", "host", "hostName"):
+            value = selected_text(host_entry.get(key))
+            if value:
+                return value
     path = display_path(info)
     if path:
         return path.split("/")[-1]
@@ -377,7 +412,7 @@ def build_ssh_argv(
     host_override: str | None = None,
 ) -> SSHCommand:
     visited = set() if visited is None else set(visited)
-    ref = str(info.get("connection") or "")
+    ref = store_id(info)
     if ref:
         if ref in visited:
             raise ExportError("Gateway cycle detected in XPipe configuration")
@@ -740,7 +775,7 @@ def render_dashboard(
 def render_list(infos: list[dict[str, Any]], *, plain: bool, no_color: bool) -> None:
     if plain or not RICH_AVAILABLE or not sys.stdout.isatty():
         for info in sorted(infos, key=lambda item: display_path(item).casefold()):
-            print(f"{display_path(info)}\t{info.get('connection')}")
+            print(f"{display_path(info)}\t{store_id(info)}")
         return
 
     console = make_console(no_color=no_color)
@@ -770,7 +805,7 @@ def render_list(infos: list[dict[str, Any]], *, plain: bool, no_color: bool) -> 
             target,
             port,
             connection_type,
-            str(info.get("connection") or ""),
+            store_id(info),
         )
     console.print(table)
 

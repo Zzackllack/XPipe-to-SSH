@@ -12,14 +12,17 @@ The script reads connection details through XPipe’s local API, displays availa
 * `uv`
 * Python 3.13 recommended
 
+The project uses `xpipe-api>=0.1.34`, which supports XPipe 24's store API.
+When run on the same computer as XPipe, the client uses XPipe's local
+authentication file automatically; an API key is only needed for a remote
+XPipe instance.
+
 ## Installation
 
 Create the project and install the dependencies:
 
 ```bash
-uv init
-uv python pin 3.13
-uv add xpipe-api rich
+uv sync
 ```
 
 Save the script as `main.py`.
@@ -95,6 +98,13 @@ Disable agent detection:
 ```bash
 uv run python main.py oracle-oc1 --agent-socket none
 ```
+
+## XPipe 24 compatibility
+
+The converter supports XPipe 24's `/store/...` API and its direct identity
+descriptors, including `passwordManagerAgent`. It also accepts the older
+connection API when used with an older client, while new installations are
+locked to the v24-compatible Python client.
 
 ## Common options
 

@@ -480,16 +480,16 @@ wheels = [
 
 [[package]]
 name = "xpipe-api"
-version = "0.1.33"
+version = "0.1.35"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp-requests" },
     { name = "packaging" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d5/bc/8ace4254d867d2e5d0c649e5ed6d7cd47612f1894c6592e29440990726b0/xpipe_api-0.1.33.tar.gz", hash = "sha256:431e6c2816c282e5dd765b6ac16c1cf85164e9af930f5be058d08e70756c8574", size = 5327, upload-time = "2026-05-17T14:28:32.89Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4f/a4/e9f6208f480b9c625e575be2180ba5a4ea51bd37f385ee954bec580c2832/xpipe_api-0.1.35.tar.gz", hash = "sha256:5c5674e7dd3e8a9f0d4d37be8b32ec65078eec93b716bc52365aa7ec17e84cce", size = 5409, upload-time = "2026-09-04T05:41:18.061Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/32/07/90fbc7a067b3022ece17357c375e71dee2bbb2c827d8004d30b0b8379b1c/xpipe_api-0.1.33-py3-none-any.whl", hash = "sha256:335a9713c36e7bb4f5cdec52f58d603d5a51487981c3f38c54cd2d3e1d7b60e6", size = 6365, upload-time = "2026-05-17T14:28:31.666Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/c0/302f457c492de34da8f519ebb385935fd165ffae3103eb71186bbffa7dae/xpipe_api-0.1.35-py3-none-any.whl", hash = "sha256:e0c2906162acaf563cb8364e2e743b1ca484582c792470cd76bed610548ba0e5", size = 6444, upload-time = "2026-09-04T05:41:16.835Z" },
 ]
 
 [[package]]
@@ -504,7 +504,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "rich", specifier = ">=15.0.0" },
-    { name = "xpipe-api", specifier = ">=0.1.33" },
+    { name = "xpipe-api", specifier = ">=0.1.34" },
 ]
 
 [[package]]
