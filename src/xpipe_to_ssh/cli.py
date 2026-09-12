@@ -8,12 +8,13 @@ import shutil
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import cast
 
 from . import __version__
 from .agents import resolve_agent_socket
 from .clipboard import copy_to_clipboard
 from .errors import AgentError, ClipboardError, ExecutionError, ExportError, XPipeError
-from .models import SSHCommand
+from .models import AgentSocket, SSHCommand
 from .presentation import RICH_AVAILABLE, choose_host_interactively, render_dashboard, render_list
 from .rendering import render
 from .selection import choose_connection, exportable
@@ -45,14 +46,25 @@ class AppDependencies:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Export an XPipe SSH connection as one OpenSSH command")
+    parser = argparse.ArgumentParser(
+        description="Export an XPipe SSH connection as one OpenSSH command"
+    )
     parser.add_argument("connection", nargs="?", help="connection name/path or XPipe UUID")
     parser.add_argument("--list", action="store_true", help="list SSH connections")
-    parser.add_argument("--shell", choices=("auto", "posix", "powershell", "json"), default="auto", help="command quoting format (default: auto)")
+    parser.add_argument(
+        "--shell",
+        choices=("auto", "posix", "powershell", "json"),
+        default="auto",
+        help="command quoting format (default: auto)",
+    )
     parser.add_argument("--ptb", action="store_true", help="connect to an XPipe PTB build")
-    parser.add_argument("--agent-socket", default="auto", metavar="PATH", help="SSH agent socket, or 'none'")
+    parser.add_argument(
+        "--agent-socket", default="auto", metavar="PATH", help="SSH agent socket, or 'none'"
+    )
     parser.add_argument("--host", metavar="ADDRESS", help="override XPipe's selected host")
-    parser.add_argument("--pick-host", action="store_true", help="interactively choose an available target")
+    parser.add_argument(
+        "--pick-host", action="store_true", help="interactively choose an available target"
+    )
     parser.add_argument("--connect", action="store_true", help="run SSH directly")
     parser.add_argument("--copy", action="store_true", help="copy the rendered command")
     parser.add_argument("--plain", action="store_true", help="print only the command")
@@ -66,7 +78,9 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[argparse.ArgumentP
     args = parser.parse_args(argv)
     if args.list and args.connection:
         parser.error("--list cannot be combined with a connection")
-    if args.list and any((args.connect, args.copy, args.host, args.pick_host, args.agent_socket != "auto")):
+    if args.list and any(
+        (args.connect, args.copy, args.host, args.pick_host, args.agent_socket != "auto")
+    ):
         parser.error("--list cannot be combined with connection-only options")
     if args.host and args.pick_host:
         parser.error("--host and --pick-host are mutually exclusive")
@@ -120,22 +134,31 @@ def prepare_command(client: object, options: CliOptions, deps: AppDependencies) 
         raise ExportError("--pick-host cannot be used with an SSH config host")
     host_override = options.host
     if options.pick_host:
-        host_override = choose_host_interactively(selected_host, available_hosts, no_color=options.no_color)
+        host_override = choose_host_interactively(
+            selected_host, available_hosts, no_color=options.no_color
+        )
     command = build_ssh_argv(client, info, host_override=host_override)
     if command.needs_password_manager_agent:
-        agent = deps.agent_resolver(
-            options.agent_socket,
-            provider=command.agent_provider,
-            identifier=command.agent_identifier,
+        agent = cast(
+            AgentSocket | None,
+            deps.agent_resolver(
+                options.agent_socket,
+                provider=command.agent_provider,
+                identifier=command.agent_identifier,
+            ),
         )
         if agent:
             command.agent = agent
             command.env["SSH_AUTH_SOCK"] = agent.path
             if agent.identity_count == 0:
                 detail = f" ({agent.probe_error})" if agent.probe_error else ""
-                command.warnings.append(f"{agent.label} socket was found, but ssh-add reported no identities{detail}.")
+                command.warnings.append(
+                    f"{agent.label} socket was found, but ssh-add reported no identities{detail}."
+                )
         else:
-            command.warnings.append("This connection uses a password-manager SSH agent, but no matching usable agent socket was found. Pass --agent-socket PATH.")
+            command.warnings.append(
+                "This connection uses a password-manager SSH agent, but no matching usable agent socket was found. Pass --agent-socket PATH."
+            )
     command.warnings = list(dict.fromkeys(command.warnings))
     return command
 
@@ -152,10 +175,14 @@ def run(options: CliOptions, deps: AppDependencies) -> int:
     if options.copy:
         deps.clipboard(command_text)
         copied = True
-    pretty = not options.plain and options.shell != "json" and RICH_AVAILABLE and sys.stdout.isatty()
+    pretty = (
+        not options.plain and options.shell != "json" and RICH_AVAILABLE and sys.stdout.isatty()
+    )
     if options.connect:
         if pretty:
-            render_dashboard(command, command_text, no_color=options.no_color, copied=copied, stderr=True)
+            render_dashboard(
+                command, command_text, no_color=options.no_color, copied=copied, stderr=True
+            )
         else:
             for warning in command.warnings:
                 print(f"warning: {warning}", file=sys.stderr)
@@ -172,7 +199,10 @@ def run(options: CliOptions, deps: AppDependencies) -> int:
 
 
 def main(argv: Sequence[str] | None = None, deps: AppDependencies | None = None) -> int:
-    parser, options = parse_options(argv)
+    try:
+        _parser, options = parse_options(argv)
+    except SystemExit as exc:
+        return int(exc.code or 0)
     try:
         return run(options, deps or AppDependencies())
     except (XPipeError, AgentError, ClipboardError, ExecutionError, ExportError) as exc:
@@ -185,4 +215,3 @@ def main(argv: Sequence[str] | None = None, deps: AppDependencies | None = None)
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

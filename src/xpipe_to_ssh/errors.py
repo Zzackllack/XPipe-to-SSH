@@ -31,4 +31,3 @@ class ClipboardError(ExportError):
 
 class ExecutionError(ExportError):
     """The local SSH executable could not be started."""
-

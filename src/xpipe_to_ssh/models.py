@@ -49,4 +49,3 @@ class SSHCommand:
     agent_provider: str | None = None
     agent_identifier: str | None = None
     agent: AgentSocket | None = None
-

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import cast
 
-from .errors import SelectionError, XPipeSchemaError
+from .errors import SelectionError
 from .xpipe import (
     WireRecord,
     XPipeAdapter,
@@ -52,17 +52,14 @@ def choose_connection(client: object, selector: str) -> WireRecord:
         ranked.append((rank, info))
 
     if not ranked:
-        raise SelectionError(
-            f"No SSH connection matched {selector!r}. Use --list to see names."
-        )
+        raise SelectionError(f"No SSH connection matched {selector!r}. Use --list to see names.")
     best_rank = min(rank for rank, _ in ranked)
     matches = [info for rank, info in ranked if rank == best_rank]
     if best_rank == 1 and len(matches) == 1:
         return matches[0]
     if len(matches) > 1:
         shown = "\n  ".join(
-            f"{display_path(info)}  [{store_id(info) or 'missing ID'}]"
-            for info in matches[:20]
+            f"{display_path(info)}  [{store_id(info) or 'missing ID'}]" for info in matches[:20]
         )
         suffix = f"\n  ... and {len(matches) - 20} more" if len(matches) > 20 else ""
         raise SelectionError(
@@ -155,4 +152,3 @@ def decode_identity_data(
         except json.JSONDecodeError:
             return decoded
     return decoded
-

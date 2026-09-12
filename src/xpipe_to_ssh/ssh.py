@@ -10,7 +10,7 @@ from collections.abc import Iterable
 
 from .errors import ExportError
 from .models import IdentityResult, SSHCommand
-from .selection import find_identity_store, resolve_identity
+from .selection import resolve_identity
 from .xpipe import (
     WireRecord,
     connection_config,
@@ -33,8 +33,7 @@ def validate_destination(value: str, *, field: str = "SSH host") -> str:
     if CONTROL_RE.search(value) or any(char.isspace() for char in value):
         raise ExportError(f"{field} contains whitespace or control characters")
     if value.startswith("-"):
-        raise ExportError(f"{field} must not start with '-'"
-        )
+        raise ExportError(f"{field} must not start with '-'")
     if value.startswith("[") or value.endswith("]"):
         if not (value.startswith("[") and value.endswith("]")):
             raise ExportError(f"Invalid bracketed {field.lower()}: {value!r}")
@@ -263,7 +262,11 @@ def build_ssh_argv(
         warnings.extend(gateway_command.warnings)
         gateway_names = [gateway_command.connection_name, *gateway_command.gateway_names]
         proxy_shell = "windows" if (platform_name or os.name) == "nt" else "posix"
-        nested = windows_join(gateway_command.argv) if proxy_shell == "windows" else shlex.join(gateway_command.argv)
+        nested = (
+            windows_join(gateway_command.argv)
+            if proxy_shell == "windows"
+            else shlex.join(gateway_command.argv)
+        )
         argv += ["-o", f"ProxyCommand={nested}"]
     if proxy_mode:
         argv += ["-W", "%h:%p"]
@@ -299,4 +302,3 @@ def windows_join(argv: list[str]) -> str:
     import subprocess
 
     return subprocess.list2cmdline(argv)
-

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 from .errors import ClipboardError
 
@@ -13,14 +14,12 @@ def copy_to_clipboard(text: str, *, timeout: float = 3) -> str:
     commands: list[list[str]] = []
     if os.name == "nt":
         commands.append(["clip"])
-    elif os.sys.platform == "darwin":
+    elif sys.platform == "darwin":
         commands.append(["pbcopy"])
     else:
         if os.environ.get("WAYLAND_DISPLAY"):
             commands.append(["wl-copy"])
-        commands.extend(
-            [["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
-        )
+        commands.extend([["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]])
 
     failures: list[str] = []
     for command in commands:
@@ -47,7 +46,8 @@ def copy_to_clipboard(text: str, *, timeout: float = 3) -> str:
         if result.returncode == 0:
             return command[0]
         detail = (result.stderr or "").strip()
-        failures.append(f"{command[0]} exited {result.returncode}" + (f": {detail}" if detail else ""))
+        failures.append(
+            f"{command[0]} exited {result.returncode}" + (f": {detail}" if detail else "")
+        )
     detail = "; ".join(failures) if failures else "no clipboard backend is configured"
     raise ClipboardError(f"Could not copy to the clipboard: {detail}")
-

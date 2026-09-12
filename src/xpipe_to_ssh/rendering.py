@@ -48,8 +48,7 @@ def render(command: SSHCommand, shell: str) -> str:
         rendered = powershell_join(command.argv)
         if command.env:
             prefix = "; ".join(
-                f"$env:{key}={powershell_join([value])}"
-                for key, value in command.env.items()
+                f"$env:{key}={powershell_join([value])}" for key, value in command.env.items()
             )
             return f"{prefix}; {rendered}"
         return rendered
@@ -57,9 +56,7 @@ def render(command: SSHCommand, shell: str) -> str:
         raise ValueError(f"Unsupported shell renderer: {shell}")
     rendered = shlex.join(command.argv)
     if command.env:
-        prefix = " ".join(
-            f"{key}={shlex.quote(value)}" for key, value in command.env.items()
-        )
+        prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in command.env.items())
         return f"{prefix} {rendered}"
     return rendered
 
@@ -77,4 +74,3 @@ def address_kind(value: str) -> str:
         return f"IPv{address.version}"
     except ValueError:
         return "Hostname"
-

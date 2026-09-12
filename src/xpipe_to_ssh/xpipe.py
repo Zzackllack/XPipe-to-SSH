@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from typing import Protocol, cast
 
 from .errors import XPipeConnectionError, XPipeSchemaError
@@ -24,7 +24,9 @@ class XPipeAdapter:
             getattr(client, "store_info", None)
         ):
             self.query_method = "store_query"
-            self.info_method = "store_info" if callable(getattr(client, "store_info", None)) else "connection_info"
+            self.info_method = (
+                "store_info" if callable(getattr(client, "store_info", None)) else "connection_info"
+            )
         elif callable(getattr(client, "connection_query", None)) or callable(
             getattr(client, "connection_info", None)
         ):
@@ -74,9 +76,7 @@ class XPipeAdapter:
         records: list[WireRecord] = []
         for index, value in enumerate(values):
             if not isinstance(value, dict):
-                raise XPipeSchemaError(
-                    f"XPipe info response item {index} must be an object"
-                )
+                raise XPipeSchemaError(f"XPipe info response item {index} must be an object")
             records.append(cast(WireRecord, value))
         returned = {store_id(record) for record in records}
         missing = [ref for ref in identifiers if ref not in returned]

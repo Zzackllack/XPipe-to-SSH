@@ -13,6 +13,7 @@ from .xpipe import WireRecord, connection_config, display_path, selected_text, s
 
 if TYPE_CHECKING:
     from rich.console import Console
+    from rich.table import Table
 
 try:
     from rich import box
@@ -35,10 +36,10 @@ def make_console(*, no_color: bool = False, stderr: bool = False) -> Console | N
 
 
 def literal(value: object, *, style: str | None = None) -> Text:
-    return Text(str(value), style=style, no_wrap=False)
+    return Text(str(value), style=style or "", no_wrap=False)
 
 
-def render_address_table(command: SSHCommand) -> object:
+def render_address_table(command: SSHCommand) -> Table | None:
     if not RICH_AVAILABLE:
         return None
     table = Table(box=box.SIMPLE_HEAVY, expand=True, show_header=True)
@@ -48,7 +49,9 @@ def render_address_table(command: SSHCommand) -> object:
     for host in command.available_hosts:
         selected = host == command.selected_host
         table.add_row(
-            literal("Selected" if selected else "Available", style="bold green" if selected else "cyan"),
+            literal(
+                "Selected" if selected else "Available", style="bold green" if selected else "cyan"
+            ),
             literal(host, style="bold" if selected else None),
             literal(address_kind(host)),
         )
@@ -91,21 +94,27 @@ def render_dashboard(
     if command.agent:
         count = command.agent.identity_count
         suffix = "identity" if count == 1 else "identities"
-        details.add_row(literal("SSH agent", style="bold"), literal(f"{command.agent.label} · {count} {suffix}"))
+        details.add_row(
+            literal("SSH agent", style="bold"), literal(f"{command.agent.label} · {count} {suffix}")
+        )
         details.add_row(literal("Agent socket", style="bold"), literal(command.agent.path))
     elif command.needs_password_manager_agent:
         details.add_row(literal("SSH agent", style="bold"), literal("Not found"))
     if command.gateway_names:
-        details.add_row(literal("Gateway", style="bold"), literal(" → ".join(command.gateway_names)))
-    console.print(Panel(details, title="Connection", border_style="blue"))
-    console.print(
-        Panel(
-            render_address_table(command),
-            title=f"Target addresses ({len(command.available_hosts)})",
-            border_style="magenta",
-            subtitle="Use --pick-host or --host ADDRESS",
+        details.add_row(
+            literal("Gateway", style="bold"), literal(" → ".join(command.gateway_names))
         )
-    )
+    console.print(Panel(details, title="Connection", border_style="blue"))
+    address_table = render_address_table(command)
+    if address_table is not None:
+        console.print(
+            Panel(
+                address_table,
+                title=f"Target addresses ({len(command.available_hosts)})",
+                border_style="magenta",
+                subtitle="Use --pick-host or --host ADDRESS",
+            )
+        )
     if command.warnings:
         warning_lines = []
         for warning in command.warnings:
@@ -113,11 +122,19 @@ def render_dashboard(
             line.append("! ", style="bold yellow")
             line.append(warning)
             warning_lines.append(line)
-        console.print(Panel(Group(*warning_lines), title=f"Warnings ({len(command.warnings)})", border_style="yellow"))
+        console.print(
+            Panel(
+                Group(*warning_lines),
+                title=f"Warnings ({len(command.warnings)})",
+                border_style="yellow",
+            )
+        )
     language = "powershell" if command_text.lstrip().startswith("$env:") else "bash"
     console.print(
         Panel(
-            Syntax(command_text, language, word_wrap=True, background_color="default", padding=(0, 1)),
+            Syntax(
+                command_text, language, word_wrap=True, background_color="default", padding=(0, 1)
+            ),
             title="SSH command",
             subtitle="Copied to clipboard" if copied else "Use --copy or --connect",
             border_style="green",
@@ -136,17 +153,30 @@ def render_list(infos: list[WireRecord], *, plain: bool, no_color: bool) -> None
         return
     table = Table(title="XPipe SSH connections", box=box.ROUNDED, expand=True, show_lines=False)
     for name, ratio in (("Name", 3), ("Target", 2), ("Port", 0), ("Type", 0), ("XPipe ID", 2)):
-        table.add_column(name, ratio=ratio or None, width=None if ratio else (6 if name == "Port" else 14), overflow="fold")
+        table.add_column(
+            name,
+            ratio=ratio or None,
+            width=None if ratio else (6 if name == "Port" else 14),
+            overflow="fold",
+        )
     for info in ordered:
         cfg = connection_config(info)
         kind = str(info.get("type") or cfg.get("type") or "")
-        target = ssh_config_alias(info, cfg) if kind == "sshConfigHost" else selected_text(cfg.get("host")) or "—"
+        target = (
+            ssh_config_alias(info, cfg)
+            if kind == "sshConfigHost"
+            else selected_text(cfg.get("host")) or "—"
+        )
         port = "—" if kind == "sshConfigHost" else selected_text(cfg.get("port")) or "22"
-        table.add_row(*(literal(value) for value in (display_path(info), target, port, kind, store_id(info))))
+        table.add_row(
+            *(literal(value) for value in (display_path(info), target, port, kind, store_id(info)))
+        )
     console.print(table)
 
 
-def choose_host_interactively(current: str | None, available: list[str], *, no_color: bool) -> str | None:
+def choose_host_interactively(
+    current: str | None, available: list[str], *, no_color: bool
+) -> str | None:
     if len(available) <= 1:
         return current
     if not sys.stdin.isatty():
@@ -164,7 +194,12 @@ def choose_host_interactively(current: str | None, available: list[str], *, no_c
             table.add_row(str(index), host, address_kind(host), "yes" if host == current else "")
         console.print(table)
         default_index = available.index(current) + 1 if current in available else 1
-        choice = Prompt.ask("Address number", choices=[str(i) for i in range(1, len(available) + 1)], default=str(default_index), console=console)
+        choice = Prompt.ask(
+            "Address number",
+            choices=[str(i) for i in range(1, len(available) + 1)],
+            default=str(default_index),
+            console=console,
+        )
         return available[int(choice) - 1]
     for index, host in enumerate(available, 1):
         print(f"{index}. {host}{' (selected)' if host == current else ''}")
@@ -172,4 +207,3 @@ def choose_host_interactively(current: str | None, available: list[str], *, no_c
         return available[int(input("Address number: ").strip()) - 1]
     except (ValueError, IndexError) as exc:
         raise ExportError("Invalid address selection") from exc
-

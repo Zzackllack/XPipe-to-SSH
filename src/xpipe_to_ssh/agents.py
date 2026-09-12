@@ -45,8 +45,7 @@ def candidate_agent_sockets(
         candidates.extend(
             [
                 home / ".bitwarden-ssh-agent.sock",
-                home
-                / "Library/Containers/com.bitwarden.desktop/Data/.bitwarden-ssh-agent.sock",
+                home / "Library/Containers/com.bitwarden.desktop/Data/.bitwarden-ssh-agent.sock",
                 home / "Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock",
             ]
         )
@@ -88,8 +87,7 @@ def probe_agent(
         result = subprocess.run(
             [executable, "-L"],
             env={**os.environ, "SSH_AUTH_SOCK": str(socket_path)},
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
@@ -141,7 +139,11 @@ def resolve_agent_socket(
             raise AgentError(f"SSH agent at {path} is unavailable: {probe.error}")
         return _socket(path, probe)
 
-    paths = list(candidates) if candidates is not None else candidate_agent_sockets(platform_name=platform_name)
+    paths = (
+        list(candidates)
+        if candidates is not None
+        else candidate_agent_sockets(platform_name=platform_name)
+    )
     existing: list[AgentSocket] = []
     for path in paths:
         if platform_name != "nt" and not path.exists():
@@ -151,7 +153,9 @@ def resolve_agent_socket(
 
     def matches(agent: AgentSocket) -> bool:
         requested_values = {value.casefold() for value in (provider, identifier) if value}
-        actual_values = {value.casefold() for value in (agent.provider, agent.identifier, agent.label) if value}
+        actual_values = {
+            value.casefold() for value in (agent.provider, agent.identifier, agent.label) if value
+        }
         return not requested_values or bool(requested_values & actual_values)
 
     for agent in existing:
@@ -163,4 +167,3 @@ def resolve_agent_socket(
     if provider or identifier:
         return None
     return existing[0] if existing else None
-
