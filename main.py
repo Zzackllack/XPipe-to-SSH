@@ -12,7 +12,8 @@ from xpipe_to_ssh.agents import (
     candidate_agent_sockets,
     resolve_agent_socket,
 )
-from xpipe_to_ssh.cli import AppDependencies, main as _main
+from xpipe_to_ssh.cli import AppDependencies
+from xpipe_to_ssh.cli import main as _main
 from xpipe_to_ssh.errors import ExportError
 from xpipe_to_ssh.models import AgentSocket, IdentityResult, SSHCommand
 from xpipe_to_ssh.presentation import (
@@ -47,6 +48,48 @@ from xpipe_to_ssh.xpipe import (
     selected_value,
     store_id,
 )
+
+__all__ = [
+    "AgentSocket",
+    "AppDependencies",
+    "ExportError",
+    "IdentityResult",
+    "RICH_AVAILABLE",
+    "SSHCommand",
+    "additional_options",
+    "address_kind",
+    "agent_identity_count",
+    "agent_label",
+    "api_method",
+    "build_ssh_argv",
+    "candidate_agent_sockets",
+    "choose_connection",
+    "choose_host_interactively",
+    "connection_config",
+    "decode_identity_data",
+    "decrypt_json",
+    "display_path",
+    "find_identity_store",
+    "identity_options",
+    "info_one",
+    "main",
+    "make_console",
+    "powershell_join",
+    "query_all",
+    "render",
+    "render_address_table",
+    "render_dashboard",
+    "render_list",
+    "resolve_agent_socket",
+    "resolve_identity",
+    "selectable_texts",
+    "selected_text",
+    "selected_value",
+    "ssh_config_alias",
+    "store_id",
+    "unique_strings",
+    "unique_text",
+]
 
 
 def unique_text(values: Iterable[object]) -> list[str]:
@@ -90,4 +133,3 @@ def main(argv: Sequence[str] | None = None, deps: AppDependencies | None = None)
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
