@@ -98,9 +98,7 @@ class CompatibilityTests(unittest.TestCase):
 
         infos = query_all(client)
 
-        self.assertEqual(
-            client.query_args, {"categories": "**", "stores": "**", "types": "*"}
-        )
+        self.assertEqual(client.query_args, {"categories": "**", "stores": "**", "types": "*"})
         self.assertEqual(client.info_args, ["store-id"])
         self.assertEqual(store_id(infos[0]), "store-id")
         self.assertEqual(connection_config(infos[0])["type"], "ssh")
@@ -109,15 +107,11 @@ class CompatibilityTests(unittest.TestCase):
         infos = query_all(V23Client())
 
         self.assertEqual(store_id(infos[0]), "connection-id")
-        self.assertEqual(
-            info_one(V23Client(), "connection-id")["connection"], "connection-id"
-        )
+        self.assertEqual(info_one(V23Client(), "connection-id")["connection"], "connection-id")
 
     def test_direct_v24_identity_descriptor_is_not_decrypted(self) -> None:
         client = V24Client()
-        result = identity_options(
-            client, connection_config(ssh_info("store", "store-id"))
-        )
+        result = identity_options(client, connection_config(ssh_info("store", "store-id")))
 
         self.assertTrue(result.needs_password_manager_agent)
         self.assertIn("Password-manager SSH agent", result.auth_methods)
@@ -160,9 +154,7 @@ class CompatibilityTests(unittest.TestCase):
             "rawData": {"hostEntry": {"name": "server-alias"}},
         }
 
-        self.assertEqual(
-            ssh_config_alias(info, connection_config(info)), "server-alias"
-        )
+        self.assertEqual(ssh_config_alias(info, connection_config(info)), "server-alias")
 
     def test_api_errors_are_not_silently_converted_to_empty_results(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "API request failed"):

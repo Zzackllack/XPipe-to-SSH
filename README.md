@@ -2,127 +2,113 @@
 
 Convert an XPipe SSH connection into a standalone OpenSSH command.
 
-The script reads connection details through XPipe’s local API, displays available target addresses, detects password-manager SSH agents, and can print or run the resulting command.
+The CLI reads connection metadata through XPipe's local HTTP API, validates
+the values it exports, shows alternative target addresses, and can print,
+copy, or execute the resulting command. It never exports XPipe-managed
+passwords.
 
 ## Requirements
 
-* macOS, Linux, or Windows
-* XPipe running and unlocked
-* **Settings → HTTP API** enabled in XPipe
-* `uv`
-* Python 3.13 recommended
+- macOS, Linux, or Windows
+- Python 3.13 or newer
+- XPipe running, unlocked, with **Settings → HTTP API** enabled
+- `uv` for installation from source
 
-The project uses `xpipe-api>=0.1.34`, which supports XPipe 24's store API.
-When run on the same computer as XPipe, the client uses XPipe's local
-authentication file automatically; an API key is only needed for a remote
-XPipe instance.
+The dependency `xpipe-api>=0.1.34` supports XPipe 24's store API. A local
+client uses XPipe's local authentication file automatically. Remote XPipe
+instances require the client to be configured with a token and base URL; this
+CLI intentionally constructs the local client only.
 
 ## Installation
 
-Create the project and install the dependencies:
-
 ```bash
+git clone https://github.com/Zzackllack/XPipe-to-SSH.git
+cd XPipe-to-SSH
 uv sync
 ```
 
-Save the script as `main.py`.
+The installed command is `xpipe-to-ssh`. `uv run python main.py` remains
+available as a compatibility entry point for older scripts.
 
 ## Usage
 
-List available SSH connections:
+List exportable connections:
 
 ```bash
-uv run python main.py --list
+xpipe-to-ssh --list
 ```
 
-Generate a command using a connection name or XPipe UUID:
+Generate a command using a full connection path, unique leaf name, or XPipe
+store UUID:
 
 ```bash
-uv run python main.py "oracle-oc1"
-uv run python main.py d0cd9b16-11b4-4c90-b1fc-391d8e4bf12f
+xpipe-to-ssh "oracle-oc1"
+xpipe-to-ssh d0cd9b16-11b4-4c90-b1fc-391d8e4bf12f
 ```
 
-Connect immediately:
+Select an alternative address or provide one explicitly:
 
 ```bash
-uv run python main.py oracle-oc1 --connect
+xpipe-to-ssh oracle-oc1 --pick-host
+xpipe-to-ssh oracle-oc1 --host 130.61.33.189
 ```
 
-Choose from XPipe’s available IP addresses:
+Use `--plain` for command-only output, `--shell json` for structured output,
+and `--copy` to copy the rendered command:
 
 ```bash
-uv run python main.py oracle-oc1 --pick-host
+xpipe-to-ssh oracle-oc1 --plain
+xpipe-to-ssh oracle-oc1 --shell json
+xpipe-to-ssh oracle-oc1 --copy
 ```
 
-Use a specific address:
+`--connect` executes the local `ssh` program after preparing the command. It
+cannot be combined with `--plain`, `--shell json`, `--list`, or interactive
+selection modes that do not apply to the selected connection.
+
+## Authentication and agents
+
+Password values stored by XPipe are not placed in argv, JSON, environment
+variables, or logs. SSH may prompt for a password if key authentication fails.
+
+For a `passwordManagerAgent` identity, the CLI carries the provider/identifier
+metadata into agent selection and sets `SSH_AUTH_SOCK` only when a usable
+agent is found:
 
 ```bash
-uv run python main.py oracle-oc1 --host 130.61.33.189
+xpipe-to-ssh oracle-oc1 --agent-socket "$HOME/.bitwarden-ssh-agent.sock"
+xpipe-to-ssh oracle-oc1 --agent-socket none
 ```
 
-Copy the command to the clipboard:
+Automatic path discovery currently covers the common macOS Bitwarden and
+1Password sockets, the Unix `SSH_AUTH_SOCK`, and explicit endpoints on
+Windows. Named-pipe/Pageant environments should use `--agent-socket` and are
+not claimed as automatic support until tested on that platform.
+
+## Output and safety contract
+
+- Normal command output is written to stdout; warnings and errors go to stderr.
+- JSON output has `schemaVersion: 1`, `connection`, `env`, `argv`, and `warnings`.
+- Exit code `0` means success, `1` means XPipe/local integration failure, and
+  `2` means invalid input, selection, or export data.
+- XPipe hosts, aliases, usernames, and additional options are treated as
+  input to OpenSSH argument construction. Review generated commands before
+  executing them, especially command-bearing options such as `ProxyCommand`
+  and `LocalCommand`.
+- `--connect` runs the local `ssh` executable from the current environment and
+  can open a network session. Tests and the optional smoke workflow do not
+  connect to SSH.
+
+## Development
 
 ```bash
-uv run python main.py oracle-oc1 --copy
+uv run python -m unittest discover -v
+uv run ruff check .
+uv run ruff format --check .
+uv run ty check
+uv lock --check
+uv build
 ```
 
-Print only the command for scripts or aliases:
-
-```bash
-uv run python main.py oracle-oc1 --plain
-```
-
-Export structured JSON:
-
-```bash
-uv run python main.py oracle-oc1 --shell json
-```
-
-## Password-manager SSH agents
-
-Bitwarden and 1Password agent sockets are detected automatically. When required, the generated command includes `SSH_AUTH_SOCK`:
-
-```bash
-SSH_AUTH_SOCK="$HOME/.bitwarden-ssh-agent.sock" ssh user@host
-```
-
-Override the detected socket:
-
-```bash
-uv run python main.py oracle-oc1 \
-  --agent-socket "$HOME/.bitwarden-ssh-agent.sock"
-```
-
-Disable agent detection:
-
-```bash
-uv run python main.py oracle-oc1 --agent-socket none
-```
-
-## XPipe 24 compatibility
-
-The converter supports XPipe 24's `/store/...` API and its direct identity
-descriptors, including `passwordManagerAgent`. It also accepts the older
-connection API when used with an older client, while new installations are
-locked to the v24-compatible Python client.
-
-## Common options
-
-| Option                | Description                    |
-| --------------------- | ------------------------------ |
-| `--list`              | List XPipe SSH connections     |
-| `--connect`           | Run SSH directly               |
-| `--pick-host`         | Choose an available address    |
-| `--host ADDRESS`      | Use a specific target address  |
-| `--copy`              | Copy the generated command     |
-| `--plain`             | Print only the command         |
-| `--shell json`        | Output connection data as JSON |
-| `--agent-socket PATH` | Select an SSH-agent socket     |
-| `--no-color`          | Disable terminal colors        |
-| `--ptb`               | Connect to an XPipe PTB build  |
-
-## Notes
-
-Passwords stored by XPipe are never placed in the generated command. A password warning means SSH may prompt for it only if key authentication fails.
-
-XPipe must be running while the script reads connection data through its local API. The generated SSH command itself does not require XPipe.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the read-only XPipe smoke-test
+policy and release notes.
