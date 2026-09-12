@@ -87,6 +87,8 @@ def identity_options(client: object, cfg: dict[str, object]) -> IdentityResult:
         key_file = selected_text(key_data.get("file"))
         normalized = key_type.casefold() if key_type else ""
         if normalized == "file" and key_file:
+            if CONTROL_RE.search(key_file):
+                raise ExportError("SSH key-file path contains control characters")
             expanded = os.path.expanduser(key_file)
             result.argv += ["-i", expanded]
             result.auth_methods.append(f"Key file: {expanded}")

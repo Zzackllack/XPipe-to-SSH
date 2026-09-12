@@ -31,10 +31,15 @@ modify XPipe data, copy secrets, or commit captured responses. Record the
 XPipe and `xpipe-api` versions with the result. Do not put credentials or
 decrypted identity payloads in fixtures or logs.
 
+The repository includes the guarded smoke command:
+
+```bash
+XPIPE_TO_SSH_LIVE_SMOKE=1 uv run python scripts/live_smoke.py
+```
+
 ## Change structure
 
 Keep commits focused by responsibility. Prefer a small adapter or value
 object over broad exception handling or another dictionary traversal in the
 CLI. When adding an external field, validate it at the XPipe boundary and
 cover malformed input as well as the happy path.
-
