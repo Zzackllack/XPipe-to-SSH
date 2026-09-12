@@ -80,9 +80,9 @@ class XPipeAdapter:
             records.append(cast(WireRecord, value))
         returned = {store_id(record) for record in records}
         missing = [ref for ref in identifiers if ref not in returned]
-        if missing and len(identifiers) == 1:
+        if missing:
             raise XPipeSchemaError(
-                f"XPipe returned a different store ID for requested {missing[0]}"
+                "XPipe info response omitted requested store IDs: " + ", ".join(missing)
             )
         return records
 

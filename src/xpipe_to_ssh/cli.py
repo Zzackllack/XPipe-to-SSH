@@ -6,6 +6,7 @@ import argparse
 import os
 import shutil
 import sys
+import traceback
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import cast
@@ -35,6 +36,7 @@ class CliOptions:
     copy: bool
     plain: bool
     no_color: bool
+    debug: bool
 
 
 @dataclass
@@ -69,6 +71,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--copy", action="store_true", help="copy the rendered command")
     parser.add_argument("--plain", action="store_true", help="print only the command")
     parser.add_argument("--no-color", action="store_true", help="disable terminal colors")
+    parser.add_argument(
+        "--debug", action="store_true", help="include a traceback for unexpected errors"
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -104,6 +109,7 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[argparse.ArgumentP
         copy=args.copy,
         plain=args.plain,
         no_color=args.no_color,
+        debug=args.debug,
     )
 
 
@@ -207,9 +213,14 @@ def main(argv: Sequence[str] | None = None, deps: AppDependencies | None = None)
         return run(options, deps or AppDependencies())
     except (XPipeError, AgentError, ClipboardError, ExecutionError, ExportError) as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 2 if isinstance(exc, ExportError) else 1
+        return 1 if isinstance(exc, (XPipeError, AgentError, ClipboardError, ExecutionError)) else 2
     except OSError as exc:
         print(f"error: local process failed: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # pragma: no cover - a final safety net for integration defects
+        print(f"error: internal error ({type(exc).__name__}): {exc}", file=sys.stderr)
+        if options.debug:
+            traceback.print_exc(file=sys.stderr)
         return 1
 
 

@@ -149,6 +149,8 @@ def parse_additional_options(raw: object) -> tuple[list[str], list[str]]:
         key = line.split("=", 1)[0].split(None, 1)[0]
         if not OPTION_RE.fullmatch(key):
             raise ExportError(f"Invalid SSH additional option: {line!r}")
+        if "=" not in line and not re.search(r"\s", line):
+            raise ExportError(f"SSH additional option needs a value: {line!r}")
         result += ["-o", line]
         if key.casefold() in COMMAND_OPTIONS:
             warnings.append(
