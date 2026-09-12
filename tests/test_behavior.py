@@ -89,6 +89,17 @@ class BehaviorTests(unittest.TestCase):
         with self.assertRaises(XPipeSchemaError):
             XPipeAdapter(BadClient()).query()
 
+    def test_stalled_xpipe_requests_have_a_deadline(self) -> None:
+        class SlowClient:
+            def store_query(self, **_: object) -> list[str]:
+                import time
+
+                time.sleep(0.05)
+                return []
+
+        with self.assertRaisesRegex(RuntimeError, "timed out"):
+            XPipeAdapter(SlowClient(), timeout=0.001).query()
+
     def test_agent_provider_is_forwarded_by_cli(self) -> None:
         info = direct_info(
             identity={

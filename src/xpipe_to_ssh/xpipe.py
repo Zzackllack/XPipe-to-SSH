@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from queue import Empty, Queue
+from threading import Thread
 from typing import Protocol, cast
 
 from .errors import XPipeConnectionError, XPipeSchemaError
@@ -18,8 +20,9 @@ class StoreClient(Protocol):
 class XPipeAdapter:
     """Bind one API generation for the lifetime of a client."""
 
-    def __init__(self, client: object) -> None:
+    def __init__(self, client: object, *, timeout: float = 10.0) -> None:
         self.client = client
+        self.timeout = timeout
         if callable(getattr(client, "store_query", None)) or callable(
             getattr(client, "store_info", None)
         ):
@@ -43,9 +46,9 @@ class XPipeAdapter:
         method = self._method(self.query_method)
         try:
             if self.query_method == "store_query":
-                refs = method(categories="**", stores="**", types="*")
+                refs = self._call(method, categories="**", stores="**", types="*")
             else:
-                refs = method(connections="**")
+                refs = self._call(method, connections="**")
         except Exception as exc:
             raise XPipeConnectionError(f"XPipe query failed: {exc}") from exc
         identifiers = _identifiers(refs, "query response")
@@ -61,14 +64,14 @@ class XPipeAdapter:
         if not callable(method):
             raise XPipeSchemaError("Installed xpipe-api cannot decrypt identity metadata")
         try:
-            return method(encrypted)
+            return self._call(method, encrypted)
         except Exception as exc:
             raise XPipeConnectionError(f"XPipe identity decryption failed: {exc}") from exc
 
     def _info(self, identifiers: list[str]) -> list[WireRecord]:
         method = self._method(self.info_method)
         try:
-            values = method(identifiers)
+            values = self._call(method, identifiers)
         except Exception as exc:
             raise XPipeConnectionError(f"XPipe store lookup failed: {exc}") from exc
         if not isinstance(values, list):
@@ -91,6 +94,32 @@ class XPipeAdapter:
         if not callable(method):
             raise XPipeSchemaError(f"XPipe client no longer provides {name}")
         return method
+
+    def _call(self, method: Callable[..., object], *args: object, **kwargs: object) -> object:
+        """Bound a synchronous third-party request to the CLI's deadline.
+
+        The upstream client currently exposes no timeout parameter. A daemon
+        worker lets this short-lived CLI stop waiting on a stalled local
+        daemon without mutating the client's private HTTP implementation.
+        """
+        result: Queue[tuple[bool, object]] = Queue(maxsize=1)
+
+        def invoke() -> None:
+            try:
+                result.put((True, method(*args, **kwargs)))
+            except Exception as exc:
+                result.put((False, exc))
+
+        Thread(target=invoke, daemon=True, name="xpipe-request").start()
+        try:
+            succeeded, value = result.get(timeout=self.timeout)
+        except Empty as exc:
+            raise XPipeConnectionError(
+                f"XPipe request timed out after {self.timeout:g} seconds"
+            ) from exc
+        if not succeeded:
+            raise cast(Exception, value)
+        return value
 
 
 def _identifiers(value: object, path: str) -> list[str]:
