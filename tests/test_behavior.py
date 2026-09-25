@@ -12,6 +12,7 @@ from xpipe_to_ssh.cli import AppDependencies, main
 from xpipe_to_ssh.errors import AgentError, XPipeSchemaError
 from xpipe_to_ssh.models import AgentSocket
 from xpipe_to_ssh.rendering import address_kind, render
+from xpipe_to_ssh.selection import choose_connection
 from xpipe_to_ssh.ssh import parse_bool, parse_port, validate_destination
 from xpipe_to_ssh.xpipe import XPipeAdapter, selected_value
 
@@ -69,6 +70,38 @@ class BehaviorTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_name_lookup_filters_before_fetching_store_details(self) -> None:
+        class FilteredClient(SingleClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.query_args: list[dict[str, object]] = []
+
+            def store_query(self, **kwargs: object) -> list[str]:
+                self.query_args.append(kwargs)
+                return ["store-id"]
+
+        client = FilteredClient()
+        self.assertEqual(choose_connection(client, "test")["store"], "store-id")
+        self.assertEqual(
+            client.query_args,
+            [{"categories": "**", "stores": "**test**", "types": "ssh*"}],
+        )
+
+    def test_name_lookup_retries_broadly_if_server_filter_misses(self) -> None:
+        class OlderClient(SingleClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.patterns: list[str] = []
+
+            def store_query(self, **kwargs: object) -> list[str]:
+                pattern = str(kwargs["stores"])
+                self.patterns.append(pattern)
+                return [] if pattern != "**" else ["store-id"]
+
+        client = OlderClient()
+        self.assertEqual(choose_connection(client, "test")["store"], "store-id")
+        self.assertEqual(client.patterns, ["**test**", "**"])
 
     def test_json_not_found_error_has_stable_code(self) -> None:
         output = io.StringIO()

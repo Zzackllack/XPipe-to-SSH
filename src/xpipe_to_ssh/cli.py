@@ -31,9 +31,9 @@ from .errors import (
 from .models import AgentSocket, SSHCommand
 from .presentation import RICH_AVAILABLE, choose_host_interactively, render_dashboard, render_list
 from .rendering import render
-from .selection import choose_connection, exportable
+from .selection import choose_connection, exportable_connections
 from .ssh import build_ssh_argv
-from .xpipe import connection_config, query_all, selectable_texts
+from .xpipe import connection_config, selectable_texts
 
 
 @dataclass(frozen=True)
@@ -266,7 +266,7 @@ def prepare_command(client: object, options: CliOptions, deps: AppDependencies) 
 def run(options: CliOptions, deps: AppDependencies) -> int:
     client = (deps.client_factory or default_client)(options.ptb)
     if options.list_mode:
-        infos = [info for info in query_all(client) if exportable(info)]
+        infos = exportable_connections(client)
         render_list(
             infos, plain=options.plain, no_color=options.no_color, json_mode=options.shell == "json"
         )

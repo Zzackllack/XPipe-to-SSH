@@ -40,15 +40,15 @@ class XPipeAdapter:
                 "Installed xpipe-api does not provide a complete store or connection API"
             )
 
-    def query(self) -> list[WireRecord]:
+    def query(self, *, types: str = "*", stores: str = "**") -> list[WireRecord]:
         if not callable(getattr(self.client, self.query_method, None)):
             raise XPipeSchemaError(f"XPipe client no longer provides {self.query_method}")
         method = self._method(self.query_method)
         try:
             if self.query_method == "store_query":
-                refs = self._call(method, categories="**", stores="**", types="*")
+                refs = self._call(method, categories="**", stores=stores, types=types)
             else:
-                refs = self._call(method, connections="**")
+                refs = self._call(method, connections=stores, types=types)
         except Exception as exc:
             raise XPipeConnectionError(f"XPipe query failed: {exc}") from exc
         identifiers = _identifiers(refs, "query response")
@@ -150,8 +150,8 @@ def info_one(client: object, ref: str) -> WireRecord:
     return XPipeAdapter(client).info(ref)
 
 
-def query_all(client: object) -> list[WireRecord]:
-    return XPipeAdapter(client).query()
+def query_all(client: object, *, types: str = "*", stores: str = "**") -> list[WireRecord]:
+    return XPipeAdapter(client).query(types=types, stores=stores)
 
 
 def display_path(info: WireRecord) -> str:

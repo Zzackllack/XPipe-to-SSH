@@ -7,6 +7,10 @@ the values it exports, shows alternative target addresses, and can print,
 copy, or execute the resulting command. It never exports XPipe-managed
 passwords.
 
+Discovery uses XPipe's store name and type filters before fetching details.
+Lookup still ranks exact paths, unique leaf names, and partial matches locally;
+XPipe UUIDs remain the most reliable selector for automation.
+
 ## Requirements
 
 - macOS, Linux, or Windows

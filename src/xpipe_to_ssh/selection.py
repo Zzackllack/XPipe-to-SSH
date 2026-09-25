@@ -30,26 +30,25 @@ def exportable(info: WireRecord) -> bool:
     }
 
 
+def exportable_connections(client: object, *, name_pattern: str = "**") -> list[WireRecord]:
+    # Filter at the daemon before fetching detailed records for unrelated stores.
+    return [
+        info for info in query_all(client, types="ssh*", stores=name_pattern) if exportable(info)
+    ]
+
+
 def choose_connection(client: object, selector: str) -> WireRecord:
     if UUID_RE.fullmatch(selector):
         return info_one(client, selector)
 
     needle = selector.casefold().strip("/")
-    infos = [info for info in query_all(client) if exportable(info)]
-    ranked: list[tuple[int, WireRecord]] = []
-    for info in infos:
-        path = display_path(info).strip("/")
-        folded = path.casefold()
-        leaf = folded.rsplit("/", 1)[-1]
-        if folded == needle:
-            rank = 0
-        elif leaf == needle:
-            rank = 1
-        elif needle in folded:
-            rank = 2
-        else:
-            continue
-        ranked.append((rank, info))
+    safe_filter = not any(char in selector for char in "*?[]\\")
+    name_pattern = f"**{selector.strip('/')}**" if safe_filter else "**"
+    infos = exportable_connections(client, name_pattern=name_pattern)
+    ranked = rank_connections(infos, needle)
+    if not ranked and name_pattern != "**":
+        # Keep local substring matching authoritative if an older API differs on globs.
+        ranked = rank_connections(exportable_connections(client), needle)
 
     if not ranked:
         raise ConnectionNotFoundError(
@@ -70,6 +69,25 @@ def choose_connection(client: object, selector: str) -> WireRecord:
             [{"name": display_path(info), "id": store_id(info)} for info in matches],
         )
     return matches[0]
+
+
+def rank_connections(infos: list[WireRecord], needle: str) -> list[tuple[int, WireRecord]]:
+    ranked: list[tuple[int, WireRecord]] = []
+    for info in infos:
+        path = display_path(info).strip("/")
+        folded = path.casefold()
+        leaf = folded.rsplit("/", 1)[-1]
+        if folded == needle:
+            rank = 0
+        elif leaf == needle:
+            rank = 1
+        elif needle in folded:
+            rank = 2
+        else:
+            continue
+        ranked.append((rank, info))
+
+    return ranked
 
 
 def find_identity_store(value: object, *, max_depth: int = 6) -> dict[str, object] | None:
