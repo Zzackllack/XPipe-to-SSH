@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from typing import TYPE_CHECKING
 
@@ -9,7 +10,14 @@ from .errors import ExportError
 from .models import SSHCommand
 from .rendering import address_kind
 from .ssh import ssh_config_alias
-from .xpipe import WireRecord, connection_config, display_path, selected_text, store_id
+from .xpipe import (
+    WireRecord,
+    connection_config,
+    display_path,
+    selectable_texts,
+    selected_text,
+    store_id,
+)
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -142,8 +150,33 @@ def render_dashboard(
     )
 
 
-def render_list(infos: list[WireRecord], *, plain: bool, no_color: bool) -> None:
+def list_entries(infos: list[WireRecord]) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    for info in sorted(infos, key=lambda item: display_path(item).casefold()):
+        cfg = connection_config(info)
+        kind = str(info.get("type") or cfg.get("type") or "")
+        host, available_hosts = selectable_texts(cfg.get("host"))
+        if kind == "sshConfigHost":
+            host = ssh_config_alias(info, cfg)
+            available_hosts = [host]
+        entries.append(
+            {
+                "name": display_path(info),
+                "id": store_id(info),
+                "type": kind,
+                "host": host,
+                "availableHosts": available_hosts,
+                "port": None if kind == "sshConfigHost" else selected_text(cfg.get("port")) or "22",
+            }
+        )
+    return entries
+
+
+def render_list(infos: list[WireRecord], *, plain: bool, no_color: bool, json_mode: bool) -> None:
     ordered = sorted(infos, key=lambda item: display_path(item).casefold())
+    if json_mode:
+        print(json.dumps({"schemaVersion": 1, "connections": list_entries(ordered)}, indent=2))
+        return
     if plain or not RICH_AVAILABLE or not sys.stdout.isatty():
         for info in ordered:
             print(f"{display_path(info)}\t{store_id(info)}")

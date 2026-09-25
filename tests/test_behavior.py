@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -45,6 +46,30 @@ class SingleClient:
 
 
 class BehaviorTests(unittest.TestCase):
+    def test_json_list_is_structured_and_contains_stable_ids(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(
+                ["--list", "--shell", "json"],
+                AppDependencies(client_factory=lambda _: SingleClient()),
+            )
+        self.assertEqual(result, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["schemaVersion"], 1)
+        self.assertEqual(
+            payload["connections"],
+            [
+                {
+                    "name": "default/test",
+                    "id": "store-id",
+                    "type": "ssh",
+                    "host": "example.test",
+                    "availableHosts": ["example.test"],
+                    "port": "22",
+                }
+            ],
+        )
+
     def test_port_boundaries_and_rejection(self) -> None:
         for value in (1, 22, 65535, "65535"):
             self.assertIn(parse_port(value), (1, 22, 65535))

@@ -36,6 +36,7 @@ List exportable connections:
 
 ```bash
 xpipe-to-ssh --list
+xpipe-to-ssh --list --shell json
 ```
 
 Generate a command using a full connection path, unique leaf name, or XPipe

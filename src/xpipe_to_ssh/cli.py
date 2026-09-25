@@ -173,7 +173,9 @@ def run(options: CliOptions, deps: AppDependencies) -> int:
     client = (deps.client_factory or default_client)(options.ptb)
     if options.list_mode:
         infos = [info for info in query_all(client) if exportable(info)]
-        render_list(infos, plain=options.plain, no_color=options.no_color)
+        render_list(
+            infos, plain=options.plain, no_color=options.no_color, json_mode=options.shell == "json"
+        )
         return 0
     command = prepare_command(client, options, deps)
     command_text = render(command, options.shell)
