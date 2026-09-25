@@ -66,7 +66,7 @@ class BehaviorTests(unittest.TestCase):
                     "type": "ssh",
                     "host": "example.test",
                     "availableHosts": ["example.test"],
-                    "port": "22",
+                    "port": 22,
                 }
             ],
         )
@@ -87,6 +87,18 @@ class BehaviorTests(unittest.TestCase):
             client.query_args,
             [{"categories": "**", "stores": "**test**", "types": "ssh*"}],
         )
+
+    def test_json_list_keeps_malformed_port_from_breaking_discovery(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(
+                ["--list", "--shell", "json"],
+                AppDependencies(
+                    client_factory=lambda _: SingleClient(direct_info(port="9" * 5000))
+                ),
+            )
+        self.assertEqual(result, 0)
+        self.assertIsNone(json.loads(output.getvalue())["connections"][0]["port"])
 
     def test_name_lookup_retries_broadly_if_server_filter_misses(self) -> None:
         class OlderClient(SingleClient):
@@ -218,12 +230,26 @@ class BehaviorTests(unittest.TestCase):
         gateway = with_agent(direct_info(host="gateway.example"), "1password")
 
         class GatewayClient(SingleClient):
-            def store_info(self, refs: list[str]) -> list[dict[str, object]]:
-                return [{**gateway, "store": refs[0]}]
+            def __init__(self, gateway_info: dict[str, object]) -> None:
+                super().__init__()
+                self.gateway_info = gateway_info
 
-        command = build_ssh_argv(GatewayClient(), target)
+            def store_info(self, refs: list[str]) -> list[dict[str, object]]:
+                return [{**self.gateway_info, "store": refs[0]}]
+
+        command = build_ssh_argv(GatewayClient(gateway), target)
         self.assertTrue(
             any("different password-manager SSH agents" in warning for warning in command.warnings)
+        )
+
+        opaque_target = with_agent(direct_info(gateway="gateway-id"), "key-one")
+        opaque_gateway = with_agent(direct_info(host="gateway.example"), "key-two")
+        opaque_command = build_ssh_argv(GatewayClient(opaque_gateway), opaque_target)
+        self.assertFalse(
+            any(
+                "different password-manager SSH agents" in warning
+                for warning in opaque_command.warnings
+            )
         )
 
     def test_port_boundaries_and_rejection(self) -> None:

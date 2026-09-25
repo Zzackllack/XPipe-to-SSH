@@ -159,6 +159,13 @@ def list_entries(infos: list[WireRecord]) -> list[dict[str, object]]:
         if kind == "sshConfigHost":
             host = ssh_config_alias(info, cfg)
             available_hosts = [host]
+        port_text = selected_text(cfg.get("port")) or "22"
+        try:
+            port = int(port_text) if port_text.isdecimal() else None
+        except ValueError:
+            port = None
+        if port is not None and not 1 <= port <= 65535:
+            port = None
         entries.append(
             {
                 "name": display_path(info),
@@ -166,7 +173,7 @@ def list_entries(infos: list[WireRecord]) -> list[dict[str, object]]:
                 "type": kind,
                 "host": host,
                 "availableHosts": available_hosts,
-                "port": None if kind == "sshConfigHost" else selected_text(cfg.get("port")) or "22",
+                "port": None if kind == "sshConfigHost" else port,
             }
         )
     return entries
