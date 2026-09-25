@@ -23,6 +23,7 @@ from .errors import (
     ExecutionError,
     ExportError,
     SelectionError,
+    StrictWarningsError,
     XPipeConnectionError,
     XPipeError,
     XPipeSchemaError,
@@ -47,6 +48,7 @@ class CliOptions:
     connect: bool
     copy: bool
     plain: bool
+    strict: bool
     no_color: bool
     debug: bool
 
@@ -79,6 +81,8 @@ def print_error(exc: Exception, *, json_mode: bool) -> None:
         code = "execution_failed"
     elif isinstance(exc, SelectionError):
         code = "selection_failed"
+    elif isinstance(exc, StrictWarningsError):
+        code = "strict_warnings"
     elif isinstance(exc, ExportError):
         code = "invalid_export_data"
     elif isinstance(exc, OSError):
@@ -88,6 +92,8 @@ def print_error(exc: Exception, *, json_mode: bool) -> None:
     detail: dict[str, object] = {"code": code, "message": str(exc)}
     if isinstance(exc, AmbiguousConnectionError):
         detail["candidates"] = exc.candidates
+    if isinstance(exc, StrictWarningsError):
+        detail["warnings"] = exc.warnings
     print(json.dumps({"schemaVersion": 1, "error": detail}))
 
 
@@ -126,6 +132,9 @@ def build_parser() -> CliArgumentParser:
     parser.add_argument("--connect", action="store_true", help="run SSH directly")
     parser.add_argument("--copy", action="store_true", help="copy the rendered command")
     parser.add_argument("--plain", action="store_true", help="print only the command")
+    parser.add_argument(
+        "--strict", action="store_true", help="fail if command generation produces warnings"
+    )
     parser.add_argument("--no-color", action="store_true", help="disable terminal colors")
     parser.add_argument(
         "--debug", action="store_true", help="include a traceback for unexpected errors"
@@ -146,7 +155,14 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
     if args.list and args.connection:
         parser.error("--list cannot be combined with a connection")
     if args.list and any(
-        (args.connect, args.copy, args.host, args.pick_host, args.agent_socket != "auto")
+        (
+            args.connect,
+            args.copy,
+            args.host,
+            args.pick_host,
+            args.agent_socket != "auto",
+            args.strict,
+        )
     ):
         parser.error("--list cannot be combined with connection-only options")
     if args.host and args.pick_host:
@@ -170,6 +186,7 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
         connect=args.connect,
         copy=args.copy,
         plain=args.plain,
+        strict=args.strict,
         no_color=args.no_color,
         debug=args.debug,
     )
@@ -240,6 +257,8 @@ def run(options: CliOptions, deps: AppDependencies) -> int:
         )
         return 0
     command = prepare_command(client, options, deps)
+    if options.strict and command.warnings:
+        raise StrictWarningsError(command.warnings)
     command_text = render(command, options.shell)
     copied = False
     if options.copy:

@@ -61,6 +61,7 @@ and `--copy` to copy the rendered command:
 xpipe-to-ssh oracle-oc1 --plain
 xpipe-to-ssh oracle-oc1 --shell json
 xpipe-to-ssh oracle-oc1 --copy
+xpipe-to-ssh oracle-oc1 --strict --shell json
 ```
 
 `--connect` executes the local `ssh` program after preparing the command. It
@@ -93,6 +94,8 @@ not claimed as automatic support until tested on that platform.
 - JSON failures have `schemaVersion: 1` and an `error` object with a stable
   `code` and `message`. Ambiguous selectors also include `candidates` with
   names and XPipe IDs. They are printed on stdout so agents can parse them.
+- `--strict` exits with code `2` when command generation has warnings, before
+  copying or connecting. JSON errors include the warning list.
 - Exit code `0` means success, `1` means XPipe/local integration failure, and
   `2` means invalid input, selection, or export data.
 - XPipe hosts, aliases, usernames, and additional options are treated as

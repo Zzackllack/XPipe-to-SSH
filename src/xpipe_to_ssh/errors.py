@@ -33,6 +33,14 @@ class AmbiguousConnectionError(SelectionError):
         self.candidates = candidates
 
 
+class StrictWarningsError(ExportError):
+    """A warning-free command was requested but could not be produced."""
+
+    def __init__(self, warnings: list[str]) -> None:
+        super().__init__(f"Command has {len(warnings)} warning(s): " + "; ".join(warnings))
+        self.warnings = warnings
+
+
 class AgentError(ExportError):
     """An explicitly requested SSH agent could not be used."""
 

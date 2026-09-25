@@ -106,6 +106,33 @@ class BehaviorTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertEqual(json.loads(output.getvalue())["error"]["code"], "invalid_arguments")
 
+    def test_strict_mode_stops_before_copying_on_warning(self) -> None:
+        copied: list[str] = []
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(
+                ["test", "--host", "other.example", "--strict", "--shell", "json", "--copy"],
+                AppDependencies(
+                    client_factory=lambda _: SingleClient(),
+                    clipboard=lambda value: copied.append(value) or "test",
+                ),
+            )
+        self.assertEqual(result, 2)
+        self.assertEqual(copied, [])
+        error = json.loads(output.getvalue())["error"]
+        self.assertEqual(error["code"], "strict_warnings")
+        self.assertEqual(len(error["warnings"]), 1)
+
+    def test_strict_mode_allows_warning_free_command(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(
+                ["test", "--strict", "--shell", "json"],
+                AppDependencies(client_factory=lambda _: SingleClient()),
+            )
+        self.assertEqual(result, 0)
+        self.assertEqual(json.loads(output.getvalue())["warnings"], [])
+
     def test_port_boundaries_and_rejection(self) -> None:
         for value in (1, 22, 65535, "65535"):
             self.assertIn(parse_port(value), (1, 22, 65535))
