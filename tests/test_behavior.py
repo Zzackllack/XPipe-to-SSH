@@ -70,6 +70,42 @@ class BehaviorTests(unittest.TestCase):
             ],
         )
 
+    def test_json_not_found_error_has_stable_code(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(
+                ["missing", "--shell", "json"],
+                AppDependencies(client_factory=lambda _: SingleClient()),
+            )
+        self.assertEqual(result, 2)
+        self.assertEqual(json.loads(output.getvalue())["error"]["code"], "connection_not_found")
+
+    def test_json_ambiguity_contains_candidate_ids(self) -> None:
+        class AmbiguousClient(SingleClient):
+            def store_query(self, **_: object) -> list[str]:
+                return ["first", "second"]
+
+            def store_info(self, refs: list[str]) -> list[dict[str, object]]:
+                return [{**direct_info(), "store": ref} for ref in refs]
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(
+                ["test", "--shell", "json"],
+                AppDependencies(client_factory=lambda _: AmbiguousClient()),
+            )
+        self.assertEqual(result, 2)
+        error = json.loads(output.getvalue())["error"]
+        self.assertEqual(error["code"], "ambiguous_connection")
+        self.assertEqual([item["id"] for item in error["candidates"]], ["first", "second"])
+
+    def test_json_argument_error_is_machine_readable(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(["test", "--shell=json", "--host", "one", "--pick-host"])
+        self.assertEqual(result, 2)
+        self.assertEqual(json.loads(output.getvalue())["error"]["code"], "invalid_arguments")
+
     def test_port_boundaries_and_rejection(self) -> None:
         for value in (1, 22, 65535, "65535"):
             self.assertIn(parse_port(value), (1, 22, 65535))

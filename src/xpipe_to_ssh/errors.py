@@ -21,6 +21,18 @@ class SelectionError(ExportError):
     """A connection or target could not be selected."""
 
 
+class ConnectionNotFoundError(SelectionError):
+    """No exportable connection matched a selector."""
+
+
+class AmbiguousConnectionError(SelectionError):
+    """Several connections matched equally well."""
+
+    def __init__(self, message: str, candidates: list[dict[str, str]]) -> None:
+        super().__init__(message)
+        self.candidates = candidates
+
+
 class AgentError(ExportError):
     """An explicitly requested SSH agent could not be used."""
 

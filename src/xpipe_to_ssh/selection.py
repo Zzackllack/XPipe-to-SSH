@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import cast
 
-from .errors import SelectionError
+from .errors import AmbiguousConnectionError, ConnectionNotFoundError
 from .xpipe import (
     WireRecord,
     XPipeAdapter,
@@ -52,7 +52,9 @@ def choose_connection(client: object, selector: str) -> WireRecord:
         ranked.append((rank, info))
 
     if not ranked:
-        raise SelectionError(f"No SSH connection matched {selector!r}. Use --list to see names.")
+        raise ConnectionNotFoundError(
+            f"No SSH connection matched {selector!r}. Use --list to see names."
+        )
     best_rank = min(rank for rank, _ in ranked)
     matches = [info for rank, info in ranked if rank == best_rank]
     if best_rank == 1 and len(matches) == 1:
@@ -62,9 +64,10 @@ def choose_connection(client: object, selector: str) -> WireRecord:
             f"{display_path(info)}  [{store_id(info) or 'missing ID'}]" for info in matches[:20]
         )
         suffix = f"\n  ... and {len(matches) - 20} more" if len(matches) > 20 else ""
-        raise SelectionError(
+        raise AmbiguousConnectionError(
             "Connection name is ambiguous. Use a full path or UUID "
-            f"({len(matches)} matches):\n  {shown}{suffix}"
+            f"({len(matches)} matches):\n  {shown}{suffix}",
+            [{"name": display_path(info), "id": store_id(info)} for info in matches],
         )
     return matches[0]
 

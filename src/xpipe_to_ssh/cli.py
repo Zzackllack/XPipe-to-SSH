@@ -3,18 +3,30 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
 import traceback
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import Never, cast
 
 from . import __version__
 from .agents import resolve_agent_socket
 from .clipboard import copy_to_clipboard
-from .errors import AgentError, ClipboardError, ExecutionError, ExportError, XPipeError
+from .errors import (
+    AgentError,
+    AmbiguousConnectionError,
+    ClipboardError,
+    ConnectionNotFoundError,
+    ExecutionError,
+    ExportError,
+    SelectionError,
+    XPipeConnectionError,
+    XPipeError,
+    XPipeSchemaError,
+)
 from .models import AgentSocket, SSHCommand
 from .presentation import RICH_AVAILABLE, choose_host_interactively, render_dashboard, render_list
 from .rendering import render
@@ -47,10 +59,54 @@ class AppDependencies:
     agent_resolver: Callable[..., object] = resolve_agent_socket
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Export an XPipe SSH connection as one OpenSSH command"
-    )
+def print_error(exc: Exception, *, json_mode: bool) -> None:
+    if not json_mode:
+        print(f"error: {exc}", file=sys.stderr)
+        return
+    if isinstance(exc, ConnectionNotFoundError):
+        code = "connection_not_found"
+    elif isinstance(exc, AmbiguousConnectionError):
+        code = "ambiguous_connection"
+    elif isinstance(exc, XPipeConnectionError):
+        code = "xpipe_request_failed"
+    elif isinstance(exc, XPipeSchemaError):
+        code = "xpipe_schema_error"
+    elif isinstance(exc, AgentError):
+        code = "agent_unavailable"
+    elif isinstance(exc, ClipboardError):
+        code = "clipboard_failed"
+    elif isinstance(exc, ExecutionError):
+        code = "execution_failed"
+    elif isinstance(exc, SelectionError):
+        code = "selection_failed"
+    elif isinstance(exc, ExportError):
+        code = "invalid_export_data"
+    elif isinstance(exc, OSError):
+        code = "local_process_failed"
+    else:
+        code = "internal_error"
+    detail: dict[str, object] = {"code": code, "message": str(exc)}
+    if isinstance(exc, AmbiguousConnectionError):
+        detail["candidates"] = exc.candidates
+    print(json.dumps({"schemaVersion": 1, "error": detail}))
+
+
+class CliArgumentParser(argparse.ArgumentParser):
+    json_errors = False
+
+    def error(self, message: str) -> Never:
+        if self.json_errors:
+            print(
+                json.dumps(
+                    {"schemaVersion": 1, "error": {"code": "invalid_arguments", "message": message}}
+                )
+            )
+            raise SystemExit(2)
+        super().error(message)
+
+
+def build_parser() -> CliArgumentParser:
+    parser = CliArgumentParser(description="Export an XPipe SSH connection as one OpenSSH command")
     parser.add_argument("connection", nargs="?", help="connection name/path or XPipe UUID")
     parser.add_argument("--list", action="store_true", help="list SSH connections")
     parser.add_argument(
@@ -78,9 +134,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def parse_options(argv: Sequence[str] | None = None) -> tuple[argparse.ArgumentParser, CliOptions]:
+def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser, CliOptions]:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    parser.json_errors = any(
+        token == "--shell=json"
+        or (token == "--shell" and index + 1 < len(tokens) and tokens[index + 1] == "json")
+        for index, token in enumerate(tokens)
+    )
+    args = parser.parse_args(tokens)
     if args.list and args.connection:
         parser.error("--list cannot be combined with a connection")
     if args.list and any(
@@ -214,13 +276,13 @@ def main(argv: Sequence[str] | None = None, deps: AppDependencies | None = None)
     try:
         return run(options, deps or AppDependencies())
     except (XPipeError, AgentError, ClipboardError, ExecutionError, ExportError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print_error(exc, json_mode=options.shell == "json")
         return 1 if isinstance(exc, (XPipeError, AgentError, ClipboardError, ExecutionError)) else 2
     except OSError as exc:
-        print(f"error: local process failed: {exc}", file=sys.stderr)
+        print_error(exc, json_mode=options.shell == "json")
         return 1
     except Exception as exc:  # pragma: no cover - a final safety net for integration defects
-        print(f"error: internal error ({type(exc).__name__}): {exc}", file=sys.stderr)
+        print_error(exc, json_mode=options.shell == "json")
         if options.debug:
             traceback.print_exc(file=sys.stderr)
         return 1

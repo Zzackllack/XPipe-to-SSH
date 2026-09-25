@@ -90,6 +90,9 @@ not claimed as automatic support until tested on that platform.
 
 - Normal command output is written to stdout; warnings and errors go to stderr.
 - JSON output has `schemaVersion: 1`, `connection`, `env`, `argv`, and `warnings`.
+- JSON failures have `schemaVersion: 1` and an `error` object with a stable
+  `code` and `message`. Ambiguous selectors also include `candidates` with
+  names and XPipe IDs. They are printed on stdout so agents can parse them.
 - Exit code `0` means success, `1` means XPipe/local integration failure, and
   `2` means invalid input, selection, or export data.
 - XPipe hosts, aliases, usernames, and additional options are treated as
