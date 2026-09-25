@@ -29,10 +29,12 @@ CLI intentionally constructs the local client only.
 git clone https://github.com/Zzackllack/XPipe-to-SSH.git
 cd XPipe-to-SSH
 uv sync
+uv run xpipe-to-ssh --help
 ```
 
-The installed command is `xpipe-to-ssh`. `uv run python main.py` remains
-available as a compatibility entry point for older scripts.
+To put `xpipe-to-ssh` on your PATH, run `uv tool install .` from the checkout.
+`uv run python main.py` remains available as a compatibility entry point for
+older scripts.
 
 ## Usage
 
@@ -107,8 +109,11 @@ Use `--strict` to reject such a command in automation.
 
 ## Output and safety contract
 
-- Normal command output is written to stdout; warnings and errors go to stderr.
-- JSON output has `schemaVersion: 1`, `connection`, `env`, `argv`, and `warnings`.
+- Normal command output is written to stdout; warnings and text-mode errors go
+  to stderr.
+- JSON command output has `schemaVersion: 1`, `connection`, `env`, `argv`, and
+  `warnings`. JSON listing has `schemaVersion: 1` and `connections` with names,
+  UUIDs, types, hosts, alternative hosts, and ports.
 - JSON failures have `schemaVersion: 1` and an `error` object with a stable
   `code` and `message`. Ambiguous selectors also include `candidates` with
   names and XPipe IDs. They are printed on stdout so agents can parse them.

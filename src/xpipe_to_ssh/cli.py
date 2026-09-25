@@ -120,7 +120,7 @@ def build_parser() -> CliArgumentParser:
         "--shell",
         choices=("auto", "posix", "powershell", "json"),
         default="auto",
-        help="command quoting format (default: auto)",
+        help="output format (default: auto)",
     )
     parser.add_argument("--ptb", action="store_true", help="connect to an XPipe PTB build")
     parser.add_argument(
