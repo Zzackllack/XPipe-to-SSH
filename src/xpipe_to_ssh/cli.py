@@ -3,24 +3,37 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
 import traceback
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import Never, cast
 
 from . import __version__
 from .agents import resolve_agent_socket
 from .clipboard import copy_to_clipboard
-from .errors import AgentError, ClipboardError, ExecutionError, ExportError, XPipeError
+from .errors import (
+    AgentError,
+    AmbiguousConnectionError,
+    ClipboardError,
+    ConnectionNotFoundError,
+    ExecutionError,
+    ExportError,
+    SelectionError,
+    StrictWarningsError,
+    XPipeConnectionError,
+    XPipeError,
+    XPipeSchemaError,
+)
 from .models import AgentSocket, SSHCommand
 from .presentation import RICH_AVAILABLE, choose_host_interactively, render_dashboard, render_list
 from .rendering import render
-from .selection import choose_connection, exportable
+from .selection import choose_connection, exportable_connections
 from .ssh import build_ssh_argv
-from .xpipe import connection_config, query_all, selectable_texts
+from .xpipe import connection_config, selectable_texts
 
 
 @dataclass(frozen=True)
@@ -33,8 +46,10 @@ class CliOptions:
     host: str | None
     pick_host: bool
     connect: bool
+    remote_command: str | None
     copy: bool
     plain: bool
+    strict: bool
     no_color: bool
     debug: bool
 
@@ -47,17 +62,67 @@ class AppDependencies:
     agent_resolver: Callable[..., object] = resolve_agent_socket
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Export an XPipe SSH connection as one OpenSSH command"
-    )
+def print_error(exc: Exception, *, json_mode: bool) -> None:
+    if not json_mode:
+        print(f"error: {exc}", file=sys.stderr)
+        return
+    if isinstance(exc, ConnectionNotFoundError):
+        code = "connection_not_found"
+    elif isinstance(exc, AmbiguousConnectionError):
+        code = "ambiguous_connection"
+    elif isinstance(exc, XPipeConnectionError):
+        code = "xpipe_request_failed"
+    elif isinstance(exc, XPipeSchemaError):
+        code = "xpipe_schema_error"
+    elif isinstance(exc, XPipeError):
+        code = "xpipe_error"
+    elif isinstance(exc, AgentError):
+        code = "agent_unavailable"
+    elif isinstance(exc, ClipboardError):
+        code = "clipboard_failed"
+    elif isinstance(exc, ExecutionError):
+        code = "execution_failed"
+    elif isinstance(exc, SelectionError):
+        code = "selection_failed"
+    elif isinstance(exc, StrictWarningsError):
+        code = "strict_warnings"
+    elif isinstance(exc, ExportError):
+        code = "invalid_export_data"
+    elif isinstance(exc, OSError):
+        code = "local_process_failed"
+    else:
+        code = "internal_error"
+    detail: dict[str, object] = {"code": code, "message": str(exc)}
+    if isinstance(exc, AmbiguousConnectionError):
+        detail["candidates"] = exc.candidates
+    if isinstance(exc, StrictWarningsError):
+        detail["warnings"] = exc.warnings
+    print(json.dumps({"schemaVersion": 1, "error": detail}))
+
+
+class CliArgumentParser(argparse.ArgumentParser):
+    json_errors = False
+
+    def error(self, message: str) -> Never:
+        if self.json_errors:
+            print(
+                json.dumps(
+                    {"schemaVersion": 1, "error": {"code": "invalid_arguments", "message": message}}
+                )
+            )
+            raise SystemExit(2)
+        super().error(message)
+
+
+def build_parser() -> CliArgumentParser:
+    parser = CliArgumentParser(description="Export an XPipe SSH connection as one OpenSSH command")
     parser.add_argument("connection", nargs="?", help="connection name/path or XPipe UUID")
     parser.add_argument("--list", action="store_true", help="list SSH connections")
     parser.add_argument(
         "--shell",
         choices=("auto", "posix", "powershell", "json"),
         default="auto",
-        help="command quoting format (default: auto)",
+        help="output format (default: auto)",
     )
     parser.add_argument("--ptb", action="store_true", help="connect to an XPipe PTB build")
     parser.add_argument(
@@ -68,8 +133,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--pick-host", action="store_true", help="interactively choose an available target"
     )
     parser.add_argument("--connect", action="store_true", help="run SSH directly")
+    parser.add_argument(
+        "--remote-command",
+        metavar="COMMAND",
+        help="run one explicit command string through the remote shell (requires --connect)",
+    )
     parser.add_argument("--copy", action="store_true", help="copy the rendered command")
     parser.add_argument("--plain", action="store_true", help="print only the command")
+    parser.add_argument(
+        "--strict", action="store_true", help="fail if command generation produces warnings"
+    )
     parser.add_argument("--no-color", action="store_true", help="disable terminal colors")
     parser.add_argument(
         "--debug", action="store_true", help="include a traceback for unexpected errors"
@@ -78,13 +151,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def parse_options(argv: Sequence[str] | None = None) -> tuple[argparse.ArgumentParser, CliOptions]:
+def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser, CliOptions]:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    parser.json_errors = any(
+        token == "--shell=json"
+        or (token == "--shell" and index + 1 < len(tokens) and tokens[index + 1] == "json")
+        for index, token in enumerate(tokens)
+    )
+    args = parser.parse_args(tokens)
     if args.list and args.connection:
         parser.error("--list cannot be combined with a connection")
     if args.list and any(
-        (args.connect, args.copy, args.host, args.pick_host, args.agent_socket != "auto")
+        (
+            args.connect,
+            args.remote_command is not None,
+            args.copy,
+            args.host,
+            args.pick_host,
+            args.agent_socket != "auto",
+            args.strict,
+        )
     ):
         parser.error("--list cannot be combined with connection-only options")
     if args.host and args.pick_host:
@@ -95,6 +182,13 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[argparse.ArgumentP
         parser.error("--connect cannot be combined with --shell json")
     if args.connect and args.plain:
         parser.error("--connect cannot be combined with --plain")
+    if args.remote_command is not None:
+        if not args.connect:
+            parser.error("--remote-command requires --connect")
+        if not args.remote_command.strip() or any(
+            ord(char) < 32 or ord(char) == 127 for char in args.remote_command
+        ):
+            parser.error("--remote-command must be non-empty and contain no control characters")
     if not args.list and not args.connection:
         parser.error("provide a connection name/UUID, or use --list")
     return parser, CliOptions(
@@ -106,8 +200,10 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[argparse.ArgumentP
         host=args.host,
         pick_host=args.pick_host,
         connect=args.connect,
+        remote_command=args.remote_command,
         copy=args.copy,
         plain=args.plain,
+        strict=args.strict,
         no_color=args.no_color,
         debug=args.debug,
     )
@@ -172,10 +268,17 @@ def prepare_command(client: object, options: CliOptions, deps: AppDependencies) 
 def run(options: CliOptions, deps: AppDependencies) -> int:
     client = (deps.client_factory or default_client)(options.ptb)
     if options.list_mode:
-        infos = [info for info in query_all(client) if exportable(info)]
-        render_list(infos, plain=options.plain, no_color=options.no_color)
+        infos = exportable_connections(client)
+        render_list(
+            infos, plain=options.plain, no_color=options.no_color, json_mode=options.shell == "json"
+        )
         return 0
     command = prepare_command(client, options, deps)
+    if options.strict and command.warnings:
+        raise StrictWarningsError(command.warnings)
+    if options.remote_command is not None:
+        # OpenSSH sends this as a remote shell command, not a preserved argv vector.
+        command.argv.append(options.remote_command)
     command_text = render(command, options.shell)
     copied = False
     if options.copy:
@@ -212,13 +315,13 @@ def main(argv: Sequence[str] | None = None, deps: AppDependencies | None = None)
     try:
         return run(options, deps or AppDependencies())
     except (XPipeError, AgentError, ClipboardError, ExecutionError, ExportError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print_error(exc, json_mode=options.shell == "json")
         return 1 if isinstance(exc, (XPipeError, AgentError, ClipboardError, ExecutionError)) else 2
     except OSError as exc:
-        print(f"error: local process failed: {exc}", file=sys.stderr)
+        print_error(exc, json_mode=options.shell == "json")
         return 1
     except Exception as exc:  # pragma: no cover - a final safety net for integration defects
-        print(f"error: internal error ({type(exc).__name__}): {exc}", file=sys.stderr)
+        print_error(exc, json_mode=options.shell == "json")
         if options.debug:
             traceback.print_exc(file=sys.stderr)
         return 1

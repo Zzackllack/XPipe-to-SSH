@@ -24,6 +24,16 @@ from .xpipe import (
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 OPTION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
 COMMAND_OPTIONS = {"proxycommand", "localcommand", "match", "include"}
+KNOWN_AGENT_PROVIDERS = ("bitwarden", "1password", "pageant")
+
+
+def agent_provider_hint(provider: str | None, identifier: str | None) -> str | None:
+    if provider:
+        normalized = provider.casefold()
+        return next((name for name in KNOWN_AGENT_PROVIDERS if name in normalized), normalized)
+    if identifier and identifier.casefold() in KNOWN_AGENT_PROVIDERS:
+        return identifier.casefold()
+    return None
 
 
 def validate_destination(value: str, *, field: str = "SSH host") -> str:
@@ -260,6 +270,22 @@ def build_ssh_argv(
             max_gateway_depth=max_gateway_depth,
             platform_name=platform_name,
         )
+        target_agent = agent_provider_hint(identity.agent_provider, identity.agent_identifier)
+        gateway_agent = agent_provider_hint(
+            gateway_command.agent_provider, gateway_command.agent_identifier
+        )
+        if (
+            identity.needs_password_manager_agent
+            and gateway_command.needs_password_manager_agent
+            and target_agent
+            and gateway_agent
+            and target_agent.casefold() != gateway_agent.casefold()
+        ):
+            # One inherited SSH_AUTH_SOCK cannot select different providers per hop.
+            warnings.append(
+                "Target and gateway require different password-manager SSH agents; "
+                "one SSH_AUTH_SOCK may not authenticate both hops."
+            )
         needs_agent = needs_agent or gateway_command.needs_password_manager_agent
         gateway_provider = gateway_provider or gateway_command.agent_provider
         gateway_identifier = gateway_identifier or gateway_command.agent_identifier

@@ -7,6 +7,10 @@ the values it exports, shows alternative target addresses, and can print,
 copy, or execute the resulting command. It never exports XPipe-managed
 passwords.
 
+Discovery uses XPipe's store name and type filters before fetching details.
+Lookup still ranks exact paths, unique leaf names, and partial matches locally;
+XPipe UUIDs remain the most reliable selector for automation.
+
 ## Requirements
 
 - macOS, Linux, or Windows
@@ -25,10 +29,12 @@ CLI intentionally constructs the local client only.
 git clone https://github.com/Zzackllack/XPipe-to-SSH.git
 cd XPipe-to-SSH
 uv sync
+uv run xpipe-to-ssh --help
 ```
 
-The installed command is `xpipe-to-ssh`. `uv run python main.py` remains
-available as a compatibility entry point for older scripts.
+To put `xpipe-to-ssh` on your PATH, run `uv tool install .` from the checkout.
+`uv run python main.py` remains available as a compatibility entry point for
+older scripts.
 
 ## Usage
 
@@ -36,6 +42,7 @@ List exportable connections:
 
 ```bash
 xpipe-to-ssh --list
+xpipe-to-ssh --list --shell json
 ```
 
 Generate a command using a full connection path, unique leaf name, or XPipe
@@ -60,11 +67,23 @@ and `--copy` to copy the rendered command:
 xpipe-to-ssh oracle-oc1 --plain
 xpipe-to-ssh oracle-oc1 --shell json
 xpipe-to-ssh oracle-oc1 --copy
+xpipe-to-ssh oracle-oc1 --strict --shell json
 ```
 
 `--connect` executes the local `ssh` program after preparing the command. It
 cannot be combined with `--plain`, `--shell json`, `--list`, or interactive
 selection modes that do not apply to the selected connection.
+
+To run a command on the selected connection, pass one explicit remote-shell
+command string:
+
+```bash
+xpipe-to-ssh oracle-oc1 --connect --remote-command 'uname -a'
+```
+
+OpenSSH passes this string to the remote shell. Shell operators and expansions
+in it run remotely; the CLI does not promise separate, safely quoted remote
+arguments. Use a fixed or deliberately constructed command string.
 
 ## Authentication and agents
 
@@ -84,11 +103,22 @@ Automatic path discovery currently covers the common macOS Bitwarden and
 1Password sockets, the Unix `SSH_AUTH_SOCK`, and explicit endpoints on
 Windows. Named-pipe/Pageant environments should use `--agent-socket` and are
 not claimed as automatic support until tested on that platform.
+If a target and its gateway name different password-manager agents, the CLI
+warns because one inherited `SSH_AUTH_SOCK` may not authenticate both hops.
+Use `--strict` to reject such a command in automation.
 
 ## Output and safety contract
 
-- Normal command output is written to stdout; warnings and errors go to stderr.
-- JSON output has `schemaVersion: 1`, `connection`, `env`, `argv`, and `warnings`.
+- Normal command output is written to stdout; warnings and text-mode errors go
+  to stderr.
+- JSON command output has `schemaVersion: 1`, `connection`, `env`, `argv`, and
+  `warnings`. JSON listing has `schemaVersion: 1` and `connections` with names,
+  UUIDs, types, hosts, alternative hosts, and ports.
+- JSON failures have `schemaVersion: 1` and an `error` object with a stable
+  `code` and `message`. Ambiguous selectors also include `candidates` with
+  names and XPipe IDs. They are printed on stdout so agents can parse them.
+- `--strict` exits with code `2` when command generation has warnings, before
+  copying or connecting. JSON errors include the warning list.
 - Exit code `0` means success, `1` means XPipe/local integration failure, and
   `2` means invalid input, selection, or export data.
 - XPipe hosts, aliases, usernames, and additional options are treated as

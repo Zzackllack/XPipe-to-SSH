@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import cast
 
-from .errors import SelectionError
+from .errors import AmbiguousConnectionError, ConnectionNotFoundError
 from .xpipe import (
     WireRecord,
     XPipeAdapter,
@@ -30,12 +30,48 @@ def exportable(info: WireRecord) -> bool:
     }
 
 
+def exportable_connections(client: object, *, name_pattern: str = "**") -> list[WireRecord]:
+    # Filter at the daemon before fetching detailed records for unrelated stores.
+    return [
+        info for info in query_all(client, types="ssh*", stores=name_pattern) if exportable(info)
+    ]
+
+
 def choose_connection(client: object, selector: str) -> WireRecord:
     if UUID_RE.fullmatch(selector):
         return info_one(client, selector)
 
     needle = selector.casefold().strip("/")
-    infos = [info for info in query_all(client) if exportable(info)]
+    safe_filter = not any(char in selector for char in "*?[]\\")
+    name_pattern = f"**{selector.strip('/')}**" if safe_filter else "**"
+    infos = exportable_connections(client, name_pattern=name_pattern)
+    ranked = rank_connections(infos, needle)
+    if not ranked and name_pattern != "**":
+        # Keep local substring matching authoritative if an older API differs on globs.
+        ranked = rank_connections(exportable_connections(client), needle)
+
+    if not ranked:
+        raise ConnectionNotFoundError(
+            f"No SSH connection matched {selector!r}. Use --list to see names."
+        )
+    best_rank = min(rank for rank, _ in ranked)
+    matches = [info for rank, info in ranked if rank == best_rank]
+    if best_rank == 1 and len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        shown = "\n  ".join(
+            f"{display_path(info)}  [{store_id(info) or 'missing ID'}]" for info in matches[:20]
+        )
+        suffix = f"\n  ... and {len(matches) - 20} more" if len(matches) > 20 else ""
+        raise AmbiguousConnectionError(
+            "Connection name is ambiguous. Use a full path or UUID "
+            f"({len(matches)} matches):\n  {shown}{suffix}",
+            [{"name": display_path(info), "id": store_id(info)} for info in matches],
+        )
+    return matches[0]
+
+
+def rank_connections(infos: list[WireRecord], needle: str) -> list[tuple[int, WireRecord]]:
     ranked: list[tuple[int, WireRecord]] = []
     for info in infos:
         path = display_path(info).strip("/")
@@ -51,22 +87,7 @@ def choose_connection(client: object, selector: str) -> WireRecord:
             continue
         ranked.append((rank, info))
 
-    if not ranked:
-        raise SelectionError(f"No SSH connection matched {selector!r}. Use --list to see names.")
-    best_rank = min(rank for rank, _ in ranked)
-    matches = [info for rank, info in ranked if rank == best_rank]
-    if best_rank == 1 and len(matches) == 1:
-        return matches[0]
-    if len(matches) > 1:
-        shown = "\n  ".join(
-            f"{display_path(info)}  [{store_id(info) or 'missing ID'}]" for info in matches[:20]
-        )
-        suffix = f"\n  ... and {len(matches) - 20} more" if len(matches) > 20 else ""
-        raise SelectionError(
-            "Connection name is ambiguous. Use a full path or UUID "
-            f"({len(matches)} matches):\n  {shown}{suffix}"
-        )
-    return matches[0]
+    return ranked
 
 
 def find_identity_store(value: object, *, max_depth: int = 6) -> dict[str, object] | None:
