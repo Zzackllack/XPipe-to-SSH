@@ -46,6 +46,7 @@ class CliOptions:
     host: str | None
     pick_host: bool
     connect: bool
+    remote_command: str | None
     copy: bool
     plain: bool
     strict: bool
@@ -130,6 +131,11 @@ def build_parser() -> CliArgumentParser:
         "--pick-host", action="store_true", help="interactively choose an available target"
     )
     parser.add_argument("--connect", action="store_true", help="run SSH directly")
+    parser.add_argument(
+        "--remote-command",
+        metavar="COMMAND",
+        help="run one explicit command string through the remote shell (requires --connect)",
+    )
     parser.add_argument("--copy", action="store_true", help="copy the rendered command")
     parser.add_argument("--plain", action="store_true", help="print only the command")
     parser.add_argument(
@@ -157,6 +163,7 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
     if args.list and any(
         (
             args.connect,
+            args.remote_command is not None,
             args.copy,
             args.host,
             args.pick_host,
@@ -173,6 +180,13 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
         parser.error("--connect cannot be combined with --shell json")
     if args.connect and args.plain:
         parser.error("--connect cannot be combined with --plain")
+    if args.remote_command is not None:
+        if not args.connect:
+            parser.error("--remote-command requires --connect")
+        if not args.remote_command.strip() or any(
+            ord(char) < 32 or ord(char) == 127 for char in args.remote_command
+        ):
+            parser.error("--remote-command must be non-empty and contain no control characters")
     if not args.list and not args.connection:
         parser.error("provide a connection name/UUID, or use --list")
     return parser, CliOptions(
@@ -184,6 +198,7 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
         host=args.host,
         pick_host=args.pick_host,
         connect=args.connect,
+        remote_command=args.remote_command,
         copy=args.copy,
         plain=args.plain,
         strict=args.strict,
@@ -259,6 +274,9 @@ def run(options: CliOptions, deps: AppDependencies) -> int:
     command = prepare_command(client, options, deps)
     if options.strict and command.warnings:
         raise StrictWarningsError(command.warnings)
+    if options.remote_command is not None:
+        # OpenSSH sends this as a remote shell command, not a preserved argv vector.
+        command.argv.append(options.remote_command)
     command_text = render(command, options.shell)
     copied = False
     if options.copy:

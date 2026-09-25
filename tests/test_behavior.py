@@ -133,6 +133,29 @@ class BehaviorTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(json.loads(output.getvalue())["warnings"], [])
 
+    def test_remote_command_is_passed_as_one_ssh_argument(self) -> None:
+        executed: list[list[str]] = []
+        result = main(
+            ["test", "--connect", "--remote-command", "printf '%s\\n' hello"],
+            AppDependencies(
+                client_factory=lambda _: SingleClient(),
+                executor=lambda argv, _env: executed.append(argv),
+            ),
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            executed,
+            [["ssh", "-l", "alice", "example.test", "printf '%s\\n' hello"]],
+        )
+
+    def test_remote_command_requires_connect_and_rejects_control_characters(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(main(["test", "--remote-command", "id"]), 2)
+            self.assertEqual(main(["test", "--connect", "--remote-command", "id\nwhoami"]), 2)
+        self.assertIn("requires --connect", stderr.getvalue())
+        self.assertIn("control characters", stderr.getvalue())
+
     def test_port_boundaries_and_rejection(self) -> None:
         for value in (1, 22, 65535, "65535"):
             self.assertIn(parse_port(value), (1, 22, 65535))

@@ -68,6 +68,17 @@ xpipe-to-ssh oracle-oc1 --strict --shell json
 cannot be combined with `--plain`, `--shell json`, `--list`, or interactive
 selection modes that do not apply to the selected connection.
 
+To run a command on the selected connection, pass one explicit remote-shell
+command string:
+
+```bash
+xpipe-to-ssh oracle-oc1 --connect --remote-command 'uname -a'
+```
+
+OpenSSH passes this string to the remote shell. Shell operators and expansions
+in it run remotely; the CLI does not promise separate, safely quoted remote
+arguments. Use a fixed or deliberately constructed command string.
+
 ## Authentication and agents
 
 Password values stored by XPipe are not placed in argv, JSON, environment
