@@ -260,6 +260,20 @@ def build_ssh_argv(
             max_gateway_depth=max_gateway_depth,
             platform_name=platform_name,
         )
+        target_agent = identity.agent_provider or identity.agent_identifier
+        gateway_agent = gateway_command.agent_provider or gateway_command.agent_identifier
+        if (
+            identity.needs_password_manager_agent
+            and gateway_command.needs_password_manager_agent
+            and target_agent
+            and gateway_agent
+            and target_agent.casefold() != gateway_agent.casefold()
+        ):
+            # One inherited SSH_AUTH_SOCK cannot select different providers per hop.
+            warnings.append(
+                "Target and gateway require different password-manager SSH agents; "
+                "one SSH_AUTH_SOCK may not authenticate both hops."
+            )
         needs_agent = needs_agent or gateway_command.needs_password_manager_agent
         gateway_provider = gateway_provider or gateway_command.agent_provider
         gateway_identifier = gateway_identifier or gateway_command.agent_identifier

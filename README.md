@@ -101,6 +101,9 @@ Automatic path discovery currently covers the common macOS Bitwarden and
 1Password sockets, the Unix `SSH_AUTH_SOCK`, and explicit endpoints on
 Windows. Named-pipe/Pageant environments should use `--agent-socket` and are
 not claimed as automatic support until tested on that platform.
+If a target and its gateway name different password-manager agents, the CLI
+warns because one inherited `SSH_AUTH_SOCK` may not authenticate both hops.
+Use `--strict` to reject such a command in automation.
 
 ## Output and safety contract
 

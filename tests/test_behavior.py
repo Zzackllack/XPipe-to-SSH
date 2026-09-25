@@ -189,6 +189,33 @@ class BehaviorTests(unittest.TestCase):
         self.assertIn("requires --connect", stderr.getvalue())
         self.assertIn("control characters", stderr.getvalue())
 
+    def test_mixed_gateway_agent_providers_are_reported(self) -> None:
+        def with_agent(info: dict[str, object], identifier: str) -> dict[str, object]:
+            raw_data = info["rawData"]
+            self.assertIsInstance(raw_data, dict)
+            raw = dict(raw_data) if isinstance(raw_data, dict) else {}
+            raw["identity"] = {
+                "type": "inPlace",
+                "identityStore": {
+                    "type": "localIdentity",
+                    "username": "alice",
+                    "sshIdentity": {"type": "passwordManagerAgent", "identifier": identifier},
+                },
+            }
+            return {**info, "rawData": raw}
+
+        target = with_agent(direct_info(gateway="gateway-id"), "bitwarden")
+        gateway = with_agent(direct_info(host="gateway.example"), "1password")
+
+        class GatewayClient(SingleClient):
+            def store_info(self, refs: list[str]) -> list[dict[str, object]]:
+                return [{**gateway, "store": refs[0]}]
+
+        command = build_ssh_argv(GatewayClient(), target)
+        self.assertTrue(
+            any("different password-manager SSH agents" in warning for warning in command.warnings)
+        )
+
     def test_port_boundaries_and_rejection(self) -> None:
         for value in (1, 22, 65535, "65535"):
             self.assertIn(parse_port(value), (1, 22, 65535))
