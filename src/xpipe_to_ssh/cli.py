@@ -74,6 +74,8 @@ def print_error(exc: Exception, *, json_mode: bool) -> None:
         code = "xpipe_request_failed"
     elif isinstance(exc, XPipeSchemaError):
         code = "xpipe_schema_error"
+    elif isinstance(exc, XPipeError):
+        code = "xpipe_error"
     elif isinstance(exc, AgentError):
         code = "agent_unavailable"
     elif isinstance(exc, ClipboardError):

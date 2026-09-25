@@ -9,7 +9,7 @@ from main import ExportError, build_ssh_argv
 
 from xpipe_to_ssh.agents import probe_agent, resolve_agent_socket
 from xpipe_to_ssh.cli import AppDependencies, main
-from xpipe_to_ssh.errors import AgentError, XPipeSchemaError
+from xpipe_to_ssh.errors import AgentError, XPipeError, XPipeSchemaError
 from xpipe_to_ssh.models import AgentSocket
 from xpipe_to_ssh.rendering import address_kind, render
 from xpipe_to_ssh.selection import choose_connection
@@ -112,6 +112,16 @@ class BehaviorTests(unittest.TestCase):
             )
         self.assertEqual(result, 2)
         self.assertEqual(json.loads(output.getvalue())["error"]["code"], "connection_not_found")
+
+    def test_json_client_setup_failure_has_xpipe_code(self) -> None:
+        def unavailable(_ptb: bool) -> object:
+            raise XPipeError("client setup failed")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(["test", "--shell", "json"], AppDependencies(client_factory=unavailable))
+        self.assertEqual(result, 1)
+        self.assertEqual(json.loads(output.getvalue())["error"]["code"], "xpipe_error")
 
     def test_json_ambiguity_contains_candidate_ids(self) -> None:
         class AmbiguousClient(SingleClient):
