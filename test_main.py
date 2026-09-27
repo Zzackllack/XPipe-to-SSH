@@ -67,8 +67,14 @@ class FailingClient:
     def store_query(self, **kwargs: object) -> list[str]:
         raise RuntimeError("API request failed")
 
+    def store_info(self, refs: list[str]) -> list[dict]:
+        return []
+
 
 class GatewayClient:
+    def store_query(self, **kwargs: object) -> list[str]:
+        return ["target"]
+
     def store_info(self, refs: list[str]) -> list[dict]:
         records = {
             "target": {

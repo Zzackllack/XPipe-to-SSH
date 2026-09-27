@@ -8,6 +8,7 @@ import re
 import shlex
 from collections.abc import Iterable
 
+from .agents import provider_hint
 from .errors import ExportError
 from .models import IdentityResult, SSHCommand
 from .selection import resolve_identity
@@ -24,16 +25,6 @@ from .xpipe import (
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 OPTION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
 COMMAND_OPTIONS = {"proxycommand", "localcommand", "match", "include"}
-KNOWN_AGENT_PROVIDERS = ("bitwarden", "1password", "pageant")
-
-
-def agent_provider_hint(provider: str | None, identifier: str | None) -> str | None:
-    if provider:
-        normalized = provider.casefold()
-        return next((name for name in KNOWN_AGENT_PROVIDERS if name in normalized), normalized)
-    if identifier and identifier.casefold() in KNOWN_AGENT_PROVIDERS:
-        return identifier.casefold()
-    return None
 
 
 def validate_destination(value: str, *, field: str = "SSH host") -> str:
@@ -114,6 +105,7 @@ def identity_options(client: object, cfg: dict[str, object]) -> IdentityResult:
         result.argv += ["-l", username]
 
     key_data = decode_identity_data(client, store.get("sshIdentity"), result.warnings)
+    offers_key_material = False
     if isinstance(key_data, dict):
         key_type = selected_text(key_data.get("type"))
         key_file = selected_text(key_data.get("file"))
@@ -124,15 +116,18 @@ def identity_options(client: object, cfg: dict[str, object]) -> IdentityResult:
             expanded = os.path.expanduser(key_file)
             result.argv += ["-i", expanded]
             result.auth_methods.append(f"Key file: {expanded}")
+            offers_key_material = True
         elif normalized == "passwordmanageragent":
             result.needs_password_manager_agent = True
             result.agent_provider = selected_text(key_data.get("provider"))
             result.agent_identifier = selected_text(key_data.get("identifier"))
             result.auth_methods.append("Password-manager SSH agent")
+            offers_key_material = True
         elif normalized in {"", "none"}:
             pass
         elif normalized == "agent":
             result.auth_methods.append("SSH agent")
+            offers_key_material = True
         else:
             result.auth_methods.append(f"XPipe key type: {key_type}")
             result.warnings.append(
@@ -141,8 +136,12 @@ def identity_options(client: object, cfg: dict[str, object]) -> IdentityResult:
 
     if store.get("password"):
         result.auth_methods.append("Password fallback")
+        # Without key material the password is the only method, so SSH will
+        # always prompt for it; saying "if the key is rejected" would be wrong.
         result.warnings.append(
             "XPipe-managed password was not exported; SSH may prompt for it if the key is rejected."
+            if offers_key_material
+            else "XPipe-managed password was not exported; SSH will prompt for the password."
         )
     if not result.auth_methods:
         result.auth_methods.append("SSH defaults / config")
@@ -294,8 +293,8 @@ def build_ssh_argv(
             max_gateway_depth=max_gateway_depth,
             platform_name=platform_name,
         )
-        target_agent = agent_provider_hint(identity.agent_provider, identity.agent_identifier)
-        gateway_agent = agent_provider_hint(
+        target_agent = provider_hint(identity.agent_provider, identity.agent_identifier)
+        gateway_agent = provider_hint(
             gateway_command.agent_provider, gateway_command.agent_identifier
         )
         if (

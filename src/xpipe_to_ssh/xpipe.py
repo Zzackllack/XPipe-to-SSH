@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import Callable
 from queue import Empty, Queue
@@ -13,44 +14,77 @@ from .errors import XPipeConnectionError, XPipeSchemaError
 WireRecord = dict[str, object]
 
 
+def _has_sync_method(client: object, name: str) -> bool:
+    return callable(getattr(client, name, None)) and not inspect.iscoroutinefunction(
+        getattr(client, name, None)
+    )
+
+
+def _detect_family(client: object) -> tuple[str, str, str]:
+    """Bind the newest API generation whose request/response pair is complete."""
+    for family in XPipeAdapter.FAMILIES:
+        if all(_has_sync_method(client, name) for name in family[1:]):
+            return family
+    if any(
+        inspect.iscoroutinefunction(getattr(client, name, None))
+        for family in XPipeAdapter.FAMILIES
+        for name in family[1:]
+    ):
+        # xpipe_api.AsyncClient subclasses Client, so its coroutine methods look
+        # callable; binding to them would hand back an un-awaited coroutine that
+        # fails far away from the real cause.
+        raise XPipeSchemaError(
+            "The xpipe-api client exposes only async methods; this CLI needs the sync Client"
+        )
+    present = [
+        name for family in XPipeAdapter.FAMILIES for name in family[1:] if hasattr(client, name)
+    ]
+    detail = f" (found only: {', '.join(present)})" if present else ""
+    raise XPipeSchemaError(
+        f"Installed xpipe-api does not provide a complete store or connection API{detail}"
+    )
+
+
 class StoreClient(Protocol):
     """The small subset of an XPipe client used by this application."""
 
 
 class XPipeAdapter:
-    """Bind one API generation for the lifetime of a client."""
+    """Bind one API generation for the lifetime of a client.
+
+    Generation detection is lazy: identity decryption only needs
+    ``secret_decrypt``, so it must not depend on the query/info API being
+    present and complete.
+    """
+
+    #: Complete request/response pairs per generation, newest first.
+    FAMILIES = (
+        ("store", "store_query", "store_info"),
+        ("connection", "connection_query", "connection_info"),
+    )
 
     def __init__(self, client: object, *, timeout: float = 10.0) -> None:
         self.client = client
         self.timeout = timeout
-        if callable(getattr(client, "store_query", None)) or callable(
-            getattr(client, "store_info", None)
-        ):
-            self.query_method = "store_query"
-            self.info_method = (
-                "store_info" if callable(getattr(client, "store_info", None)) else "connection_info"
-            )
-        elif callable(getattr(client, "connection_query", None)) or callable(
-            getattr(client, "connection_info", None)
-        ):
-            self.query_method = "connection_query"
-            self.info_method = "connection_info"
-        else:
-            raise XPipeSchemaError(
-                "Installed xpipe-api does not provide a complete store or connection API"
-            )
+        self._family: tuple[str, str, str] | None = None
+
+    @property
+    def family(self) -> tuple[str, str, str]:
+        if self._family is None:
+            self._family = _detect_family(self.client)
+        return self._family
 
     def query(self, *, types: str = "*", stores: str = "**") -> list[WireRecord]:
-        if not callable(getattr(self.client, self.query_method, None)):
-            raise XPipeSchemaError(f"XPipe client no longer provides {self.query_method}")
-        method = self._method(self.query_method)
+        generation, query_method, _ = self.family
+        method = self._method(query_method)
         try:
-            if self.query_method == "store_query":
+            if generation == "store":
                 refs = self._call(method, categories="**", stores=stores, types=types)
             else:
                 refs = self._call(method, connections=stores, types=types)
         except Exception as exc:
             raise XPipeConnectionError(f"XPipe query failed: {exc}") from exc
+
         identifiers = _identifiers(refs, "query response")
         if not identifiers:
             return []
@@ -69,7 +103,7 @@ class XPipeAdapter:
             raise XPipeConnectionError(f"XPipe identity decryption failed: {exc}") from exc
 
     def _info(self, identifiers: list[str]) -> list[WireRecord]:
-        method = self._method(self.info_method)
+        method = self._method(self.family[2])
         try:
             values = self._call(method, identifiers)
         except Exception as exc:

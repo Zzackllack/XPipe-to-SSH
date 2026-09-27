@@ -10,16 +10,16 @@ from unittest import mock
 
 from main import ExportError, build_ssh_argv
 
-from xpipe_to_ssh import presentation
+from xpipe_to_ssh import agents, presentation
 from xpipe_to_ssh.agents import probe_agent, resolve_agent_socket
 from xpipe_to_ssh.cli import AppDependencies, default_client, main
 from xpipe_to_ssh.errors import AgentError, XPipeConnectionError, XPipeError, XPipeSchemaError
-from xpipe_to_ssh.models import AgentSocket
+from xpipe_to_ssh.models import AgentProbe, AgentSocket
 from xpipe_to_ssh.presentation import choose_host_interactively
 from xpipe_to_ssh.rendering import address_kind, render
-from xpipe_to_ssh.selection import choose_connection
-from xpipe_to_ssh.ssh import parse_bool, parse_port, validate_destination
-from xpipe_to_ssh.xpipe import XPipeAdapter, selected_value
+from xpipe_to_ssh.selection import choose_connection, decode_identity_data
+from xpipe_to_ssh.ssh import identity_options, parse_bool, parse_port, validate_destination
+from xpipe_to_ssh.xpipe import XPipeAdapter, connection_config, selected_value
 
 
 @contextlib.contextmanager
@@ -331,6 +331,9 @@ class BehaviorTests(unittest.TestCase):
                 time.sleep(0.05)
                 return []
 
+            def store_info(self, refs: list[str]) -> list[dict[str, object]]:
+                return []
+
         with self.assertRaisesRegex(RuntimeError, "timed out"):
             XPipeAdapter(SlowClient(), timeout=0.001).query()
 
@@ -429,7 +432,10 @@ class RegressionTests(unittest.TestCase):
 
     def test_address_selection_rejects_numbers_outside_the_offered_range(self) -> None:
         available = ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
-        with mock.patch.object(presentation, "RICH_AVAILABLE", False):
+        with (
+            mock.patch.object(presentation, "RICH_AVAILABLE", False),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
             for answer in ("0", "-1", "4", "abc", ""):
                 with self.subTest(answer=answer), fake_tty_stdin(f"{answer}\n"):
                     with self.assertRaises(ExportError):
@@ -437,7 +443,11 @@ class RegressionTests(unittest.TestCase):
 
     def test_address_selection_at_end_of_input_is_not_an_internal_error(self) -> None:
         available = ["10.0.0.1", "10.0.0.2"]
-        with mock.patch.object(presentation, "RICH_AVAILABLE", False), fake_tty_stdin(""):
+        with (
+            mock.patch.object(presentation, "RICH_AVAILABLE", False),
+            contextlib.redirect_stderr(io.StringIO()),
+            fake_tty_stdin(""),
+        ):
             with self.assertRaises(ExportError):
                 choose_host_interactively("10.0.0.1", available, no_color=True)
 
@@ -469,6 +479,206 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(json.loads(output.getvalue())["connection"]["host"], "10.0.0.2")
+
+
+class AgentSelectionTests(unittest.TestCase):
+    """Agent matching against a real XPipe `passwordManagerAgent` identity."""
+
+    def resolve(
+        self,
+        requested: str,
+        *,
+        names: list[str],
+        count: int,
+        provider: str | None = None,
+        identifier: str | None = None,
+    ) -> AgentSocket | None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = []
+            for name in names:
+                path = Path(directory) / name
+                path.touch()
+                paths.append(path)
+            with mock.patch.object(agents, "probe_agent", return_value=AgentProbe(count, None)):
+                return resolve_agent_socket(
+                    requested,
+                    candidates=paths,
+                    platform_name="posix",
+                    provider=provider,
+                    identifier=identifier,
+                )
+
+    def resolve_one(
+        self,
+        requested: str,
+        *,
+        names: list[str],
+        count: int,
+        provider: str | None = None,
+        identifier: str | None = None,
+    ) -> AgentSocket:
+        agent = self.resolve(
+            requested, names=names, count=count, provider=provider, identifier=identifier
+        )
+        if agent is None:
+            self.fail("expected an agent socket to be resolved")
+        return agent
+
+    def test_xpipe_key_name_does_not_disqualify_a_working_agent(self) -> None:
+        # XPipe stores the password-manager *key name* in `identifier`, and
+        # `ssh-add -L` lists it as the key comment - it is not a product name.
+        agent = self.resolve_one(
+            "auto", names=["bitwarden-agent.sock"], count=2, identifier="MacBook Air SSH Key"
+        )
+
+        self.assertEqual(agent.provider, "bitwarden")
+        self.assertEqual(agent.identity_count, 2)
+
+    def test_named_product_still_selects_that_agent_first(self) -> None:
+        agent = self.resolve_one(
+            "auto",
+            names=["bitwarden-agent.sock", "1password-agent.sock"],
+            count=3,
+            provider="1Password",
+        )
+
+        self.assertEqual(agent.provider, "1password")
+
+    def test_unsatisfiable_product_preference_reports_no_agent(self) -> None:
+        agent = self.resolve(
+            "auto", names=["bitwarden-agent.sock"], count=2, identifier="1password"
+        )
+
+        self.assertIsNone(agent)
+
+    def test_cli_sets_agent_sock_for_a_live_password_manager_identity(self) -> None:
+        info = direct_info(
+            identity={
+                "type": "inPlace",
+                "identityStore": {
+                    "type": "localIdentity",
+                    "username": "alice",
+                    "sshIdentity": {
+                        "type": "passwordManagerAgent",
+                        "identifier": "MacBook Air SSH Key",
+                    },
+                },
+            }
+        )
+
+        def agent_resolver(requested: str, **kwargs: object) -> AgentSocket:
+            return AgentSocket("/tmp/agent.sock", "Bitwarden", 2, provider="bitwarden")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(
+                ["test", "--shell", "json"],
+                AppDependencies(
+                    client_factory=lambda _: SingleClient(info), agent_resolver=agent_resolver
+                ),
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(result, 0)
+        self.assertEqual(payload["env"], {"SSH_AUTH_SOCK": "/tmp/agent.sock"})
+        self.assertEqual(payload["warnings"], [])
+
+    def test_password_warning_is_accurate_without_key_material(self) -> None:
+        keyless = identity_options(
+            SingleClient(),
+            connection_config(
+                direct_info(
+                    identity={
+                        "type": "inPlace",
+                        "identityStore": {
+                            "username": "alice",
+                            "sshIdentity": {"type": "none"},
+                            "password": "secret",
+                        },
+                    }
+                )
+            ),
+        )
+        keyed = identity_options(
+            SingleClient(),
+            connection_config(
+                direct_info(
+                    identity={
+                        "type": "inPlace",
+                        "identityStore": {
+                            "username": "alice",
+                            "sshIdentity": {"type": "agent"},
+                            "password": "secret",
+                        },
+                    }
+                )
+            ),
+        )
+
+        self.assertIn("SSH will prompt for the password", keyless.warnings[0])
+        self.assertIn("if the key is rejected", keyed.warnings[0])
+
+
+class AdapterAndArgumentTests(unittest.TestCase):
+    """Client-generation binding and pre-parse machine-output detection."""
+
+    def test_json_errors_survive_argparse_abbreviations(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(["test", "--she", "json", "--host", "one", "--pick-host"])
+
+        self.assertEqual(result, 2)
+        self.assertEqual(json.loads(output.getvalue())["error"]["code"], "invalid_arguments")
+
+    def test_text_errors_stay_text_without_a_json_request(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = main(["test", "--she", "posix", "--host", "one", "--pick-host"])
+
+        self.assertEqual(result, 2)
+        self.assertIn("mutually exclusive", stderr.getvalue())
+
+    def test_incomplete_store_api_is_reported_precisely(self) -> None:
+        class HalfClient:
+            def store_query(self, **kwargs: object) -> list[str]:
+                return []
+
+        with self.assertRaisesRegex(XPipeSchemaError, r"found only: store_query"):
+            XPipeAdapter(HalfClient()).query()
+
+    def test_async_only_client_is_rejected_before_it_returns_a_coroutine(self) -> None:
+        class AsyncLike:
+            async def store_query(self, **kwargs: object) -> list[str]:
+                return []
+
+            async def store_info(self, refs: list[str]) -> list[dict]:
+                return []
+
+            async def secret_decrypt(self, value: object) -> object:
+                return {}
+
+        with self.assertRaisesRegex(XPipeSchemaError, "async"):
+            XPipeAdapter(AsyncLike()).query()
+
+    def test_decryption_failure_is_not_downgraded_to_a_warning(self) -> None:
+        class FailingDecrypt:
+            def secret_decrypt(self, value: object) -> object:
+                raise TimeoutError("daemon stalled")
+
+        warnings: list[str] = []
+        with self.assertRaises(XPipeConnectionError):
+            decode_identity_data(FailingDecrypt(), {"secrets": "ciphertext"}, warnings)
+        self.assertEqual(warnings, [])
+
+    def test_decryption_does_not_require_the_query_api(self) -> None:
+        class DecryptOnly:
+            def secret_decrypt(self, value: object) -> object:
+                return '{"type": "none"}'
+
+        self.assertEqual(
+            decode_identity_data(DecryptOnly(), {"secrets": "x"}, []),
+            {"type": "none"},
+        )
 
 
 if __name__ == "__main__":

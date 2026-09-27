@@ -12,6 +12,24 @@ from pathlib import Path
 from .errors import AgentError
 from .models import AgentProbe, AgentSocket
 
+#: Password-manager products whose agent socket this CLI can recognize.
+KNOWN_PROVIDERS = ("bitwarden", "1password", "pageant")
+
+
+def provider_hint(provider: str | None, identifier: str | None) -> str | None:
+    """Return the agent product a provider/identifier pair names, if any.
+
+    XPipe fills ``identifier`` with the *key name* stored in the password
+    manager ("MacBook Air SSH Key"), not the product, so a pair that matches no
+    known product yields ``None`` and must not be used to filter candidates.
+    """
+    if provider:
+        normalized = provider.casefold()
+        return next((name for name in KNOWN_PROVIDERS if name in normalized), normalized)
+    if identifier and identifier.casefold() in KNOWN_PROVIDERS:
+        return identifier.casefold()
+    return None
+
 
 def _provider_for(path: Path) -> tuple[str, str | None]:
     normalized = str(path).casefold()
@@ -151,12 +169,17 @@ def resolve_agent_socket(
         current = _socket(path, probe_agent(path, platform_name=platform_name))
         existing.append(current)
 
+    # Only a recognized product name is a usable preference. An XPipe key name
+    # must not disqualify a working socket, or every password-manager
+    # connection would lose its agent and fall back to an ambient SSH_AUTH_SOCK.
+    wanted = provider_hint(provider, identifier)
+
     def matches(agent: AgentSocket) -> bool:
-        requested_values = {value.casefold() for value in (provider, identifier) if value}
-        actual_values = {
-            value.casefold() for value in (agent.provider, agent.identifier, agent.label) if value
-        }
-        return not requested_values or bool(requested_values & actual_values)
+        if not wanted:
+            return True
+        actual = (agent.provider or "").casefold()
+        # An unrecognized socket path is a fallback candidate, not a mismatch.
+        return not actual or actual == wanted
 
     for agent in existing:
         if matches(agent) and agent.identity_count > 0:
@@ -164,6 +187,6 @@ def resolve_agent_socket(
     for agent in existing:
         if matches(agent):
             return agent
-    if provider or identifier:
+    if wanted:
         return None
     return existing[0] if existing else None

@@ -10,6 +10,7 @@ from .xpipe import (
     WireRecord,
     XPipeAdapter,
     connection_config,
+    decode_json,
     display_path,
     info_one,
     query_all,
@@ -146,7 +147,12 @@ def decode_identity_data(
     value: object,
     warnings: list[str],
 ) -> object:
-    """Recognize documented v24 descriptors before decrypting v23 envelopes."""
+    """Recognize documented v24 descriptors before decrypting v23 envelopes.
+
+    A failed decryption is raised, not warned about: silently exporting a
+    command without its key material would leave the user with a password
+    prompt that XPipe actually knows how to answer.
+    """
     direct_types = {"none", "file", "agent", "passwordmanageragent"}
     encrypted_keys = {"secrets", "encryptedValue", "encryptedToken"}
     if isinstance(value, dict):
@@ -158,18 +164,4 @@ def decode_identity_data(
             return None
     if not value:
         return None
-    try:
-        decoded = XPipeAdapter(client).decrypt(value)
-    except (ValueError, TypeError, RuntimeError) as exc:
-        warnings.append(f"Could not decrypt SSH identity metadata: {exc}")
-        return None
-    if isinstance(decoded, (dict, list)):
-        return decoded
-    if isinstance(decoded, str):
-        try:
-            import json
-
-            return json.loads(decoded)
-        except json.JSONDecodeError:
-            return decoded
-    return decoded
+    return decode_json(XPipeAdapter(client).decrypt(value))

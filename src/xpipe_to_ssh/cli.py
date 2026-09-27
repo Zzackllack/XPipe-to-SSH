@@ -114,12 +114,15 @@ class CliArgumentParser(argparse.ArgumentParser):
         super().error(message)
 
 
+SHELL_FLAG = "--shell"
+
+
 def build_parser() -> CliArgumentParser:
     parser = CliArgumentParser(description="Export an XPipe SSH connection as one OpenSSH command")
     parser.add_argument("connection", nargs="?", help="connection name/path or XPipe UUID")
     parser.add_argument("--list", action="store_true", help="list SSH connections")
     parser.add_argument(
-        "--shell",
+        SHELL_FLAG,
         choices=("auto", "posix", "powershell", "json"),
         default="auto",
         help="output format (default: auto)",
@@ -151,15 +154,30 @@ def build_parser() -> CliArgumentParser:
     return parser
 
 
+def shell_wants_json(tokens: Sequence[str]) -> bool:
+    """Detect a machine-output request before argparse reports a bad argument.
+
+    argparse accepts unambiguous abbreviations such as ``--she json``, so an
+    exact match on ``--shell`` is not enough: the first argument error must
+    still be machine readable.
+    """
+    for index, token in enumerate(tokens):
+        name, _, inline = token.partition("=")
+        if not name.startswith("--") or not SHELL_FLAG.startswith(name):
+            continue
+        value = inline or (tokens[index + 1] if index + 1 < len(tokens) else "")
+        if value == "json":
+            return True
+    return False
+
+
 def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser, CliOptions]:
     parser = build_parser()
     tokens = list(sys.argv[1:] if argv is None else argv)
-    parser.json_errors = any(
-        token == "--shell=json"
-        or (token == "--shell" and index + 1 < len(tokens) and tokens[index + 1] == "json")
-        for index, token in enumerate(tokens)
-    )
+    parser.json_errors = shell_wants_json(tokens)
     args = parser.parse_args(tokens)
+    # The parsed value is authoritative for the validation errors below.
+    parser.json_errors = args.shell == "json"
     if args.list and args.connection:
         parser.error("--list cannot be combined with a connection")
     if args.list and any(
