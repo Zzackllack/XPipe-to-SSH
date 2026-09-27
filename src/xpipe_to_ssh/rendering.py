@@ -7,8 +7,13 @@ import json
 import os
 import re
 import shlex
+from typing import Literal
 
 from .models import SSHCommand
+
+#: Output formats, shared with the argument parser so the two cannot drift.
+Shell = Literal["auto", "posix", "powershell", "json"]
+SHELL_CHOICES: tuple[Shell, ...] = ("auto", "posix", "powershell", "json")
 
 
 def powershell_join(argv: list[str]) -> str:
@@ -20,7 +25,7 @@ def powershell_join(argv: list[str]) -> str:
     return " ".join(quote(arg) for arg in argv)
 
 
-def render(command: SSHCommand, shell: str) -> str:
+def render(command: SSHCommand, shell: Shell) -> str:
     if shell == "auto":
         shell = "powershell" if os.name == "nt" else "posix"
     if shell == "json":
@@ -52,8 +57,6 @@ def render(command: SSHCommand, shell: str) -> str:
             )
             return f"{prefix}; {rendered}"
         return rendered
-    if shell != "posix":
-        raise ValueError(f"Unsupported shell renderer: {shell}")
     rendered = shlex.join(command.argv)
     if command.env:
         prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in command.env.items())

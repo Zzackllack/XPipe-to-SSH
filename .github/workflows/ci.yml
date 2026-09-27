@@ -29,3 +29,37 @@ jobs:
       - name: Build
         run: uv build
 
+  # The CLI claims Windows support, and the PowerShell renderer, the Windows
+  # agent discovery, and the cmdline ProxyCommand quoting are all platform
+  # branches that ubuntu cannot exercise.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.13
+      - name: Install dependencies
+        run: uv sync --locked
+      - name: Test
+        run: uv run python -m unittest discover -v
+      - name: Type check
+        run: uv run ty check
+
+  # Rich is a hard dependency, but the code degrades without it; make sure the
+  # fallback paths keep working rather than only existing on paper.
+  without-rich:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.13
+      - name: Install dependencies without rich
+        run: uv sync --locked --no-group dev && uv pip uninstall rich
+      - name: Test
+        run: uv run python -m unittest discover -v

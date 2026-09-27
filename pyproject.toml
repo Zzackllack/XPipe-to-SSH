@@ -25,6 +25,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+xpipe_to_ssh = ["py.typed"]
+
 [tool.ruff]
 target-version = "py313"
 line-length = 100
@@ -38,4 +41,4 @@ ignore = ["E501"]
 python-version = "3.13"
 
 [tool.ty.src]
-include = ["src", "tests"]
+include = ["src", "tests", "scripts"]

@@ -7,7 +7,7 @@ import json
 from collections.abc import Callable
 from queue import Empty, Queue
 from threading import Thread
-from typing import Protocol, cast
+from typing import cast
 
 from .errors import XPipeConnectionError, XPipeSchemaError
 
@@ -43,10 +43,6 @@ def _detect_family(client: object) -> tuple[str, str, str]:
     raise XPipeSchemaError(
         f"Installed xpipe-api does not provide a complete store or connection API{detail}"
     )
-
-
-class StoreClient(Protocol):
-    """The small subset of an XPipe client used by this application."""
 
 
 class XPipeAdapter:

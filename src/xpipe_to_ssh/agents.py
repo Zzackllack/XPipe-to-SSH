@@ -55,10 +55,10 @@ def candidate_agent_sockets(
     if platform_name == "nt":
         # Named-pipe/Pageant endpoints cannot be validated with Path.exists();
         # explicit --agent-socket remains the reliable Windows escape hatch.
-        for key in ("SSH_AUTH_SOCK", "SSH_AGENT_PID"):
-            value = environ.get(key)
-            if value and key == "SSH_AUTH_SOCK":
-                candidates.append(Path(value))
+        # SSH_AGENT_PID is deliberately ignored: it holds a pid, not an endpoint.
+        current = environ.get("SSH_AUTH_SOCK")
+        if current:
+            candidates.append(Path(current))
     else:
         candidates.extend(
             [
@@ -78,10 +78,6 @@ def candidate_agent_sockets(
             result.append(candidate)
             seen.add(value)
     return result
-
-
-def agent_label(path: Path) -> str:
-    return _provider_for(path)[0]
 
 
 def probe_agent(
@@ -117,12 +113,6 @@ def probe_agent(
     if result.returncode != 0:
         return AgentProbe(0, "ssh-add reported no usable identities")
     return AgentProbe(len([line for line in result.stdout.splitlines() if line.strip()]), None)
-
-
-def agent_identity_count(socket_path: Path) -> int:
-    """Compatibility helper returning zero for unavailable probes."""
-    probe = probe_agent(socket_path)
-    return probe.identity_count or 0
 
 
 def _socket(path: Path, probe: AgentProbe) -> AgentSocket:

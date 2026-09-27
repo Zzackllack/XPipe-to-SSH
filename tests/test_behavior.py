@@ -29,7 +29,12 @@ from xpipe_to_ssh.ssh import (
     parse_port,
     validate_destination,
 )
-from xpipe_to_ssh.xpipe import XPipeAdapter, connection_config, selected_value
+from xpipe_to_ssh.xpipe import (
+    WireRecord,
+    XPipeAdapter,
+    connection_config,
+    selected_value,
+)
 
 
 @contextlib.contextmanager
@@ -289,6 +294,45 @@ class BehaviorTests(unittest.TestCase):
             )
         )
 
+    def test_plain_list_carries_the_same_fields_as_the_table(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(
+                ["--list", "--plain"], AppDependencies(client_factory=lambda _: SingleClient())
+            )
+
+        self.assertEqual(result, 0)
+        row = output.getvalue().strip().split("\t")
+        self.assertEqual(row, ["default/test", "example.test", "22", "ssh", "store-id"])
+
+    def test_windows_gateway_nests_a_cmdline_quoted_proxy_command(self) -> None:
+        # Windows OpenSSH parses ProxyCommand with the C runtime rules, so a
+        # nested value containing a space needs double quotes, not shell quotes.
+        gateway: WireRecord = {
+            "store": "gateway",
+            "type": "ssh",
+            "name": ["default", "gateway"],
+            "rawData": {
+                "type": "ssh",
+                "host": "gateway.example",
+                "port": 22,
+                "additionalOptions": "UserKnownHostsFile=my hosts",
+            },
+        }
+        target = direct_info(gateway="gateway")
+
+        class GatewayClient(SingleClient):
+            def store_info(self, refs: list[str]) -> list[dict[str, object]]:
+                return [gateway]
+
+        windows = build_ssh_argv(GatewayClient(), target, platform_name="nt")
+        posix = build_ssh_argv(GatewayClient(), target, platform_name="posix")
+
+        windows_proxy = next(v for v in windows.argv if v.startswith("ProxyCommand="))
+        posix_proxy = next(v for v in posix.argv if v.startswith("ProxyCommand="))
+        self.assertIn('"UserKnownHostsFile=my hosts"', windows_proxy)
+        self.assertIn("'UserKnownHostsFile=my hosts'", posix_proxy)
+
     def test_untrusted_input_in_errors_is_bounded(self) -> None:
         huge = "9" * 5000
         with self.assertRaises(ExportError) as caught:
@@ -468,6 +512,7 @@ class RegressionTests(unittest.TestCase):
             with self.assertRaises(ExportError):
                 choose_host_interactively("10.0.0.1", available, no_color=True)
 
+    @unittest.skipUnless(presentation.RICH_AVAILABLE, "requires rich")
     def test_rich_prompt_console_writes_to_stderr(self) -> None:
         with (
             mock.patch.object(presentation, "RICH_AVAILABLE", True),

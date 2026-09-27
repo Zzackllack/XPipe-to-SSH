@@ -11,7 +11,7 @@ from collections.abc import Iterable
 from .agents import provider_hint
 from .errors import ExportError
 from .models import GatewayPlan, IdentityResult, SSHCommand
-from .selection import resolve_identity
+from .selection import decode_identity_data, resolve_identity
 from .xpipe import (
     WireRecord,
     connection_config,
@@ -171,17 +171,6 @@ def identity_options(client: object, cfg: dict[str, object]) -> IdentityResult:
     if not result.auth_methods:
         result.auth_methods.append("SSH defaults / config")
     return result
-
-
-def decode_identity_data(client: object, value: object, warnings: list[str]) -> object:
-    from .selection import decode_identity_data as decode
-
-    return decode(client, value, warnings)
-
-
-def additional_options(raw: object) -> list[str]:
-    options, _ = parse_additional_options(raw)
-    return options
 
 
 def parse_additional_options(raw: object) -> tuple[list[str], list[str]]:

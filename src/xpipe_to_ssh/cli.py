@@ -5,12 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import sys
 import traceback
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Never, cast
+from typing import Never
 
 from . import __version__
 from .agents import resolve_agent_socket
@@ -27,9 +26,9 @@ from .errors import (
 )
 from .models import AgentSocket, SSHCommand
 from .presentation import RICH_AVAILABLE, choose_host_interactively, render_dashboard, render_list
-from .rendering import render
+from .rendering import SHELL_CHOICES, Shell, render
 from .selection import choose_connection, exportable_connections
-from .ssh import build_ssh_argv
+from .ssh import build_ssh_argv, dedupe
 from .xpipe import connection_config, connection_type, selectable_texts
 
 
@@ -37,7 +36,7 @@ from .xpipe import connection_config, connection_type, selectable_texts
 class CliOptions:
     connection: str | None
     list_mode: bool
-    shell: str
+    shell: Shell
     ptb: bool
     agent_socket: str
     host: str | None
@@ -53,10 +52,12 @@ class CliOptions:
 
 @dataclass
 class AppDependencies:
+    """Injection points for tests; every default is the real implementation."""
+
     client_factory: Callable[[bool], object] | None = None
     clipboard: Callable[[str], str] = copy_to_clipboard
     executor: Callable[[list[str], dict[str, str]], None] | None = None
-    agent_resolver: Callable[..., object] = resolve_agent_socket
+    agent_resolver: Callable[..., AgentSocket | None] = resolve_agent_socket
 
 
 def error_code(exc: Exception) -> str:
@@ -101,7 +102,7 @@ def build_parser() -> CliArgumentParser:
     parser.add_argument("--list", action="store_true", help="list SSH connections")
     parser.add_argument(
         SHELL_FLAG,
-        choices=("auto", "posix", "powershell", "json"),
+        choices=SHELL_CHOICES,
         default="auto",
         help="output format (default: auto)",
     )
@@ -222,10 +223,17 @@ def default_client(ptb: bool) -> object:
 
 
 def _execvpe(argv: list[str], env: dict[str, str]) -> None:
-    executable = shutil.which(argv[0], path=env.get("PATH"))
-    if not executable:
-        raise ExecutionError(f"SSH executable {argv[0]!r} was not found on PATH")
-    os.execvpe(executable, argv, env)
+    """Replace this process with ssh, resolving it from the command's own PATH.
+
+    execvpe already looks up env["PATH"], and a failing lookup is a plain
+    FileNotFoundError, so there is no separate which() pass to keep in sync.
+    """
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execvpe(argv[0], argv, env)
+    except OSError as exc:
+        raise ExecutionError(f"Could not run {argv[0]!r} from PATH: {exc}") from exc
 
 
 def prepare_command(client: object, options: CliOptions, deps: AppDependencies) -> SSHCommand:
@@ -248,13 +256,10 @@ def prepare_command(client: object, options: CliOptions, deps: AppDependencies) 
         )
     command = build_ssh_argv(client, info, host_override=host_override)
     if command.needs_password_manager_agent:
-        agent = cast(
-            AgentSocket | None,
-            deps.agent_resolver(
-                options.agent_socket,
-                provider=command.agent_provider,
-                identifier=command.agent_identifier,
-            ),
+        agent = deps.agent_resolver(
+            options.agent_socket,
+            provider=command.agent_provider,
+            identifier=command.agent_identifier,
         )
         if agent:
             command.agent = agent
@@ -268,7 +273,7 @@ def prepare_command(client: object, options: CliOptions, deps: AppDependencies) 
             command.warnings.append(
                 "This connection uses a password-manager SSH agent, but no matching usable agent socket was found. Pass --agent-socket PATH."
             )
-    command.warnings = list(dict.fromkeys(command.warnings))
+    command.warnings = dedupe(command.warnings)
     return command
 
 

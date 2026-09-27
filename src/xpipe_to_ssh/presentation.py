@@ -188,8 +188,20 @@ def render_list(infos: list[WireRecord], *, plain: bool, no_color: bool, json_mo
         print(json.dumps({"schemaVersion": 1, "connections": list_entries(ordered)}, indent=2))
         return
     if plain or not RICH_AVAILABLE or not sys.stdout.isatty():
-        for info in ordered:
-            print(f"{display_path(info)}\t{store_id(info)}")
+        # Keep the same fields as the table so a plain run is not a downgrade
+        # in information, only in formatting. Tab separated, one record per line.
+        for entry in list_entries(ordered):
+            print(
+                "\t".join(
+                    (
+                        str(entry["name"]),
+                        str(entry["host"] or "—"),
+                        "—" if entry["port"] is None else str(entry["port"]),
+                        str(entry["type"] or "—"),
+                        str(entry["id"]),
+                    )
+                )
+            )
         return
     console = make_console(no_color=no_color)
     if console is None:
