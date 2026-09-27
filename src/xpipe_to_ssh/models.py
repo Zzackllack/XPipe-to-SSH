@@ -31,6 +31,17 @@ class AgentSocket:
 
 
 @dataclass
+class GatewayPlan:
+    """The ProxyCommand contribution of an optional gateway hop."""
+
+    argv: list[str] = field(default_factory=list)
+    names: list[str] = field(default_factory=list)
+    needs_agent: bool = False
+    provider: str | None = None
+    identifier: str | None = None
+
+
+@dataclass
 class SSHCommand:
     argv: list[str]
     env: dict[str, str] = field(default_factory=dict)
@@ -43,7 +54,7 @@ class SSHCommand:
     selected_host: str = ""
     available_hosts: list[str] = field(default_factory=list)
     username: str | None = None
-    port: int = 22
+    port: int | None = None
     auth_methods: list[str] = field(default_factory=list)
     gateway_names: list[str] = field(default_factory=list)
     agent_provider: str | None = None

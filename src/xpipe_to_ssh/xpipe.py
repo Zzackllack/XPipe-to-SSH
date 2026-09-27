@@ -210,6 +210,16 @@ def connection_config(info: WireRecord) -> dict[str, object]:
     return {}
 
 
+def connection_type(info: WireRecord) -> str:
+    """Resolve the connection type, preferring the store-level field.
+
+    XPipe reports the type on the store and again inside the config envelope;
+    the store field is the authoritative one when both are present.
+    """
+    cfg = connection_config(info)
+    return str(info.get("type") or cfg.get("type") or "")
+
+
 def selected_value(value: object) -> object:
     """Unwrap selected-value envelopes with cycle and depth protection."""
     seen: set[int] = set()

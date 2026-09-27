@@ -10,11 +10,12 @@ from collections.abc import Iterable
 
 from .agents import provider_hint
 from .errors import ExportError
-from .models import IdentityResult, SSHCommand
+from .models import GatewayPlan, IdentityResult, SSHCommand
 from .selection import resolve_identity
 from .xpipe import (
     WireRecord,
     connection_config,
+    connection_type,
     display_path,
     info_one,
     selectable_texts,
@@ -25,6 +26,22 @@ from .xpipe import (
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 OPTION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
 COMMAND_OPTIONS = {"proxycommand", "localcommand", "match", "include"}
+
+#: A port is 1-65535, so five significant digits is the most that can be valid.
+MAX_PORT_DIGITS = 5
+MAX_ECHOED_INPUT = 40
+
+
+def brief(value: str, limit: int = MAX_ECHOED_INPUT) -> str:
+    """Shorten untrusted input before it reaches an error message or JSON.
+
+    XPipe fields are echoed back in errors, and a malformed field can be
+    megabytes long; the message should stay readable and the JSON bounded.
+    """
+    text = repr(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}... ({len(value)} chars)"
 
 
 def validate_destination(value: str, *, field: str = "SSH host") -> str:
@@ -37,12 +54,12 @@ def validate_destination(value: str, *, field: str = "SSH host") -> str:
         raise ExportError(f"{field} must not start with '-'")
     if value.startswith("[") or value.endswith("]"):
         if not (value.startswith("[") and value.endswith("]")):
-            raise ExportError(f"Invalid bracketed {field.lower()}: {value!r}")
+            raise ExportError(f"Invalid bracketed {field.lower()}: {brief(value)}")
         inner = value[1:-1]
         try:
             ipaddress.ip_address(inner)
         except ValueError as exc:
-            raise ExportError(f"Invalid bracketed {field.lower()}: {value!r}") from exc
+            raise ExportError(f"Invalid bracketed {field.lower()}: {brief(value)}") from exc
         return inner
     return value
 
@@ -58,8 +75,16 @@ def parse_port(value: object, *, default: int = 22) -> int:
         return default
     text = selected_text(value)
     if text is None or not re.fullmatch(r"[0-9]+", text):
-        raise ExportError(f"Invalid SSH port {text!r}; expected an integer from 1 to 65535")
-    port = int(text)
+        raise ExportError(
+            f"Invalid SSH port {brief(text or '')}; expected an integer from 1 to 65535"
+        )
+    # Reject on digit count before calling int(): a malformed field of thousands
+    # of digits would otherwise raise the interpreter's integer-conversion
+    # ValueError instead of an ExportError.
+    digits = text.lstrip("0") or "0"
+    if len(digits) > MAX_PORT_DIGITS:
+        raise ExportError(f"Invalid SSH port {brief(text)}; expected an integer from 1 to 65535")
+    port = int(digits)
     if not 1 <= port <= 65535:
         raise ExportError(f"Invalid SSH port {port}; expected an integer from 1 to 65535")
     return port
@@ -72,7 +97,7 @@ def usable_destinations(values: Iterable[str], warnings: list[str]) -> list[str]
         try:
             normalized = validate_destination(value)
         except ExportError:
-            warnings.append(f"Ignored an unusable XPipe target address: {value!r}.")
+            warnings.append(f"Ignored an unusable XPipe target address: {brief(value)}.")
             continue
         if normalized not in result:
             result.append(normalized)
@@ -181,9 +206,9 @@ def parse_additional_options(raw: object) -> tuple[list[str], list[str]]:
             raise ExportError("SSH additional option contains control characters")
         key = line.split("=", 1)[0].split(None, 1)[0]
         if not OPTION_RE.fullmatch(key):
-            raise ExportError(f"Invalid SSH additional option: {line!r}")
+            raise ExportError(f"Invalid SSH additional option: {brief(line)}")
         if "=" not in line and not re.search(r"\s", line):
-            raise ExportError(f"SSH additional option needs a value: {line!r}")
+            raise ExportError(f"SSH additional option needs a value: {brief(line)}")
         result += ["-o", line]
         if key.casefold() in COMMAND_OPTIONS:
             warnings.append(
@@ -231,42 +256,19 @@ def build_ssh_argv(
     visited.add(ref)
 
     cfg = connection_config(info)
-    connection_type = str(info.get("type") or cfg.get("type") or "")
+    kind = connection_type(info)
     name = display_path(info)
-    if connection_type == "sshConfigHost" or cfg.get("type") == "sshConfigHost":
-        alias = ssh_config_alias(info, cfg)
-        argv = ["ssh"]
-        if proxy_mode:
-            argv += ["-W", "%h:%p"]
-        argv.append(alias)
-        return SSHCommand(
-            argv=argv,
-            connection_name=name,
-            connection_id=ref,
-            connection_type="sshConfigHost",
-            selected_host=alias,
-            available_hosts=[alias],
-            auth_methods=["~/.ssh/config"],
-        )
-    if cfg.get("type") != "ssh" and connection_type != "ssh":
-        raise ExportError(f"{name!r} is type {connection_type!r}, not an exportable SSH connection")
+    if kind == "sshConfigHost":
+        return ssh_config_command(info, cfg, name=name, ref=ref, proxy_mode=proxy_mode)
+    if kind != "ssh":
+        raise ExportError(f"{name!r} is type {kind!r}, not an exportable SSH connection")
 
-    selected_host, available_hosts = selectable_texts(cfg.get("host"))
-    host = validate_destination(host_override or selected_host or "")
     warnings: list[str] = []
-    if host_override and available_hosts and host_override not in available_hosts:
-        warnings.append(
-            f"The manually selected host {host_override!r} was not in XPipe's advertised alternatives."
-        )
-    # One stale address in XPipe's alternatives must not break the whole export:
-    # only the selected host is load-bearing for the generated command.
-    available_hosts = usable_destinations(available_hosts, warnings)
-    if host not in available_hosts:
-        available_hosts.insert(0, host)
-
+    host, available_hosts = resolve_hosts(cfg, host_override, warnings)
     port = parse_port(cfg.get("port"))
     identity = identity_options(client, cfg)
     warnings.extend(identity.warnings)
+
     argv = ["ssh"]
     if port != 22:
         argv += ["-p", str(port)]
@@ -277,57 +279,24 @@ def build_ssh_argv(
     argv += extra
     warnings.extend(extra_warnings)
 
-    gateway_names: list[str] = []
-    needs_agent = identity.needs_password_manager_agent
-    gateway_provider = identity.agent_provider
-    gateway_identifier = identity.agent_identifier
-    gateway_ref = selected_text(cfg.get("gateway"))
-    if gateway_ref:
-        gateway_info = info_one(client, gateway_ref)
-        gateway_command = build_ssh_argv(
-            client,
-            gateway_info,
-            proxy_mode=True,
-            visited=visited,
-            depth=depth + 1,
-            max_gateway_depth=max_gateway_depth,
-            platform_name=platform_name,
-        )
-        target_agent = provider_hint(identity.agent_provider, identity.agent_identifier)
-        gateway_agent = provider_hint(
-            gateway_command.agent_provider, gateway_command.agent_identifier
-        )
-        if (
-            identity.needs_password_manager_agent
-            and gateway_command.needs_password_manager_agent
-            and target_agent
-            and gateway_agent
-            and target_agent.casefold() != gateway_agent.casefold()
-        ):
-            # One inherited SSH_AUTH_SOCK cannot select different providers per hop.
-            warnings.append(
-                "Target and gateway require different password-manager SSH agents; "
-                "one SSH_AUTH_SOCK may not authenticate both hops."
-            )
-        needs_agent = needs_agent or gateway_command.needs_password_manager_agent
-        gateway_provider = gateway_provider or gateway_command.agent_provider
-        gateway_identifier = gateway_identifier or gateway_command.agent_identifier
-        warnings.extend(gateway_command.warnings)
-        gateway_names = [gateway_command.connection_name, *gateway_command.gateway_names]
-        proxy_shell = "windows" if (platform_name or os.name) == "nt" else "posix"
-        nested = (
-            windows_join(gateway_command.argv)
-            if proxy_shell == "windows"
-            else shlex.join(gateway_command.argv)
-        )
-        argv += ["-o", f"ProxyCommand={nested}"]
+    gateway = plan_gateway(
+        client,
+        cfg,
+        identity,
+        visited=visited,
+        depth=depth,
+        max_gateway_depth=max_gateway_depth,
+        platform_name=platform_name,
+        warnings=warnings,
+    )
+    argv += gateway.argv
     if proxy_mode:
         argv += ["-W", "%h:%p"]
     argv.append(host)
     return SSHCommand(
         argv=argv,
-        warnings=unique_strings(warnings),
-        needs_password_manager_agent=needs_agent,
+        warnings=dedupe(warnings),
+        needs_password_manager_agent=gateway.needs_agent,
         connection_name=name,
         connection_id=ref,
         connection_type="ssh",
@@ -336,18 +305,119 @@ def build_ssh_argv(
         username=identity.username,
         port=port,
         auth_methods=identity.auth_methods,
-        gateway_names=gateway_names,
-        agent_provider=gateway_provider,
-        agent_identifier=gateway_identifier,
+        gateway_names=gateway.names,
+        agent_provider=gateway.provider,
+        agent_identifier=gateway.identifier,
     )
 
 
-def unique_strings(values: Iterable[str]) -> list[str]:
-    result: list[str] = []
-    for value in values:
-        if value not in result:
-            result.append(value)
-    return result
+def resolve_hosts(
+    cfg: dict[str, object], host_override: str | None, warnings: list[str]
+) -> tuple[str, list[str]]:
+    """Pick the target address and keep the usable alternatives around it."""
+    selected_host, advertised = selectable_texts(cfg.get("host"))
+    host = validate_destination(host_override or selected_host or "")
+    if host_override and advertised and host_override not in advertised:
+        warnings.append(
+            f"The manually selected host {host_override!r} was not in XPipe's advertised alternatives."
+        )
+    # One stale address in XPipe's alternatives must not break the whole export:
+    # only the selected host is load-bearing for the generated command.
+    available = usable_destinations(advertised, warnings)
+    if host not in available:
+        available.insert(0, host)
+    return host, available
+
+
+def plan_gateway(
+    client: object,
+    cfg: dict[str, object],
+    identity: IdentityResult,
+    *,
+    visited: set[str],
+    depth: int,
+    max_gateway_depth: int,
+    platform_name: str | None,
+    warnings: list[str],
+) -> GatewayPlan:
+    """Build the ProxyCommand for a gateway hop, if the connection has one."""
+    plan = GatewayPlan(
+        argv=[],
+        names=[],
+        needs_agent=identity.needs_password_manager_agent,
+        provider=identity.agent_provider,
+        identifier=identity.agent_identifier,
+    )
+    gateway_ref = selected_text(cfg.get("gateway"))
+    if not gateway_ref:
+        return plan
+
+    gateway_command = build_ssh_argv(
+        client,
+        info_one(client, gateway_ref),
+        proxy_mode=True,
+        visited=visited,
+        depth=depth + 1,
+        max_gateway_depth=max_gateway_depth,
+        platform_name=platform_name,
+    )
+    if _agents_disagree(identity, gateway_command):
+        # One inherited SSH_AUTH_SOCK cannot select different providers per hop.
+        warnings.append(
+            "Target and gateway require different password-manager SSH agents; "
+            "one SSH_AUTH_SOCK may not authenticate both hops."
+        )
+    warnings.extend(gateway_command.warnings)
+    nested = (
+        windows_join(gateway_command.argv)
+        if (platform_name or os.name) == "nt"
+        else shlex.join(gateway_command.argv)
+    )
+    return GatewayPlan(
+        argv=["-o", f"ProxyCommand={nested}"],
+        names=[gateway_command.connection_name, *gateway_command.gateway_names],
+        needs_agent=plan.needs_agent or gateway_command.needs_password_manager_agent,
+        provider=plan.provider or gateway_command.agent_provider,
+        identifier=plan.identifier or gateway_command.agent_identifier,
+    )
+
+
+def _agents_disagree(identity: IdentityResult, gateway: SSHCommand) -> bool:
+    if not (identity.needs_password_manager_agent and gateway.needs_password_manager_agent):
+        return False
+    target = provider_hint(identity.agent_provider, identity.agent_identifier)
+    hop = provider_hint(gateway.agent_provider, gateway.agent_identifier)
+    # An unrecognized provider on either side cannot prove a mismatch.
+    return bool(target and hop and target != hop)
+
+
+def ssh_config_command(
+    info: WireRecord,
+    cfg: dict[str, object],
+    *,
+    name: str,
+    ref: str,
+    proxy_mode: bool,
+) -> SSHCommand:
+    """Build the command for a connection that defers everything to ~/.ssh/config."""
+    alias = ssh_config_alias(info, cfg)
+    argv = ["ssh"]
+    if proxy_mode:
+        argv += ["-W", "%h:%p"]
+    argv.append(alias)
+    return SSHCommand(
+        argv=argv,
+        connection_name=name,
+        connection_id=ref,
+        connection_type="sshConfigHost",
+        selected_host=alias,
+        available_hosts=[alias],
+        auth_methods=["~/.ssh/config"],
+    )
+
+
+def dedupe(values: Iterable[str]) -> list[str]:
+    return list(dict.fromkeys(values))
 
 
 def windows_join(argv: list[str]) -> str:

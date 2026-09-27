@@ -16,24 +16,21 @@ from . import __version__
 from .agents import resolve_agent_socket
 from .clipboard import copy_to_clipboard
 from .errors import (
-    AgentError,
-    AmbiguousConnectionError,
-    ClipboardError,
-    ConnectionNotFoundError,
+    EXIT_OK,
     ExecutionError,
     ExportError,
-    SelectionError,
+    InternalError,
+    LocalProcessError,
     StrictWarningsError,
     XPipeConnectionError,
     XPipeError,
-    XPipeSchemaError,
 )
 from .models import AgentSocket, SSHCommand
 from .presentation import RICH_AVAILABLE, choose_host_interactively, render_dashboard, render_list
 from .rendering import render
 from .selection import choose_connection, exportable_connections
 from .ssh import build_ssh_argv
-from .xpipe import connection_config, selectable_texts
+from .xpipe import connection_config, connection_type, selectable_texts
 
 
 @dataclass(frozen=True)
@@ -62,41 +59,22 @@ class AppDependencies:
     agent_resolver: Callable[..., object] = resolve_agent_socket
 
 
+def error_code(exc: Exception) -> str:
+    """Resolve the stable JSON code for a failure, without an ordered ladder."""
+    if isinstance(exc, ExportError):
+        return exc.code
+    if isinstance(exc, OSError):
+        return LocalProcessError.code
+    return InternalError.code
+
+
 def print_error(exc: Exception, *, json_mode: bool) -> None:
     if not json_mode:
         print(f"error: {exc}", file=sys.stderr)
         return
-    if isinstance(exc, ConnectionNotFoundError):
-        code = "connection_not_found"
-    elif isinstance(exc, AmbiguousConnectionError):
-        code = "ambiguous_connection"
-    elif isinstance(exc, XPipeConnectionError):
-        code = "xpipe_request_failed"
-    elif isinstance(exc, XPipeSchemaError):
-        code = "xpipe_schema_error"
-    elif isinstance(exc, XPipeError):
-        code = "xpipe_error"
-    elif isinstance(exc, AgentError):
-        code = "agent_unavailable"
-    elif isinstance(exc, ClipboardError):
-        code = "clipboard_failed"
-    elif isinstance(exc, ExecutionError):
-        code = "execution_failed"
-    elif isinstance(exc, SelectionError):
-        code = "selection_failed"
-    elif isinstance(exc, StrictWarningsError):
-        code = "strict_warnings"
-    elif isinstance(exc, ExportError):
-        code = "invalid_export_data"
-    elif isinstance(exc, OSError):
-        code = "local_process_failed"
-    else:
-        code = "internal_error"
-    detail: dict[str, object] = {"code": code, "message": str(exc)}
-    if isinstance(exc, AmbiguousConnectionError):
-        detail["candidates"] = exc.candidates
-    if isinstance(exc, StrictWarningsError):
-        detail["warnings"] = exc.warnings
+    detail: dict[str, object] = {"code": error_code(exc), "message": str(exc)}
+    if isinstance(exc, ExportError):
+        detail.update(exc.details())
     print(json.dumps({"schemaVersion": 1, "error": detail}))
 
 
@@ -256,10 +234,13 @@ def prepare_command(client: object, options: CliOptions, deps: AppDependencies) 
     info = choose_connection(client, options.connection)
     cfg = connection_config(info)
     selected_host, available_hosts = selectable_texts(cfg.get("host"))
-    if options.host and (str(info.get("type") or cfg.get("type")) == "sshConfigHost"):
-        raise ExportError("--host cannot be used with an SSH config host")
-    if options.pick_host and (str(info.get("type") or cfg.get("type")) == "sshConfigHost"):
-        raise ExportError("--pick-host cannot be used with an SSH config host")
+    if connection_type(info) == "sshConfigHost":
+        # An ssh config entry owns its own address resolution, so there is
+        # nothing for --host or --pick-host to override.
+        if options.host:
+            raise ExportError("--host cannot be used with an SSH config host")
+        if options.pick_host:
+            raise ExportError("--pick-host cannot be used with an SSH config host")
     host_override = options.host
     if options.pick_host:
         host_override = choose_host_interactively(
@@ -337,15 +318,15 @@ def main(argv: Sequence[str] | None = None, deps: AppDependencies | None = None)
     try:
         _parser, options = parse_options(argv)
     except SystemExit as exc:
-        return int(exc.code or 0)
+        return int(exc.code or EXIT_OK)
     try:
         return run(options, deps or AppDependencies())
-    except (XPipeError, AgentError, ClipboardError, ExecutionError, ExportError) as exc:
+    except ExportError as exc:
         print_error(exc, json_mode=options.shell == "json")
-        return 1 if isinstance(exc, (XPipeError, AgentError, ClipboardError, ExecutionError)) else 2
+        return exc.exit_code
     except OSError as exc:
         print_error(exc, json_mode=options.shell == "json")
-        return 1
+        return LocalProcessError.exit_code
     except KeyboardInterrupt:
         # Ctrl-C at the interactive host menu is a normal user abort, not a defect.
         print("aborted", file=sys.stderr)
@@ -354,7 +335,7 @@ def main(argv: Sequence[str] | None = None, deps: AppDependencies | None = None)
         print_error(exc, json_mode=options.shell == "json")
         if options.debug:
             traceback.print_exc(file=sys.stderr)
-        return 1
+        return InternalError.exit_code
 
 
 if __name__ == "__main__":

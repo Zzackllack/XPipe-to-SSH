@@ -9,10 +9,11 @@ from typing import TYPE_CHECKING
 from .errors import ExportError
 from .models import SSHCommand
 from .rendering import address_kind
-from .ssh import ssh_config_alias
+from .ssh import parse_port, ssh_config_alias
 from .xpipe import (
     WireRecord,
     connection_config,
+    connection_type,
     display_path,
     selectable_texts,
     selected_text,
@@ -94,7 +95,10 @@ def render_dashboard(
         ("Connection", command.connection_name or "—"),
         ("XPipe ID", command.connection_id or "—"),
         ("Target", command.selected_host),
-        ("Port", command.port),
+        (
+            "Port",
+            str(command.port) if command.port is not None else "from ~/.ssh/config",
+        ),
         ("User", command.username or "SSH default"),
         ("Authentication", ", ".join(command.auth_methods) or "SSH default"),
     ):
@@ -154,17 +158,16 @@ def list_entries(infos: list[WireRecord]) -> list[dict[str, object]]:
     entries: list[dict[str, object]] = []
     for info in sorted(infos, key=lambda item: display_path(item).casefold()):
         cfg = connection_config(info)
-        kind = str(info.get("type") or cfg.get("type") or "")
+        kind = connection_type(info)
         host, available_hosts = selectable_texts(cfg.get("host"))
         if kind == "sshConfigHost":
             host = ssh_config_alias(info, cfg)
             available_hosts = [host]
-        port_text = selected_text(cfg.get("port")) or "22"
+        # A port the CLI cannot use must not break discovery, so fall back to
+        # the same parse the exporter uses and report nothing when it fails.
         try:
-            port = int(port_text) if port_text.isdecimal() else None
-        except ValueError:
-            port = None
-        if port is not None and not 1 <= port <= 65535:
+            port = None if kind == "sshConfigHost" else parse_port(cfg.get("port"))
+        except ExportError:
             port = None
         entries.append(
             {
@@ -173,7 +176,7 @@ def list_entries(infos: list[WireRecord]) -> list[dict[str, object]]:
                 "type": kind,
                 "host": host,
                 "availableHosts": available_hosts,
-                "port": None if kind == "sshConfigHost" else port,
+                "port": port,
             }
         )
     return entries
@@ -201,7 +204,7 @@ def render_list(infos: list[WireRecord], *, plain: bool, no_color: bool, json_mo
         )
     for info in ordered:
         cfg = connection_config(info)
-        kind = str(info.get("type") or cfg.get("type") or "")
+        kind = connection_type(info)
         target = (
             ssh_config_alias(info, cfg)
             if kind == "sshConfigHost"

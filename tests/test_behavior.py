@@ -289,10 +289,17 @@ class BehaviorTests(unittest.TestCase):
             )
         )
 
+    def test_untrusted_input_in_errors_is_bounded(self) -> None:
+        huge = "9" * 5000
+        with self.assertRaises(ExportError) as caught:
+            parse_port(huge)
+        self.assertLess(len(str(caught.exception)), 200)
+        self.assertIn("5000 chars", str(caught.exception))
+
     def test_port_boundaries_and_rejection(self) -> None:
-        for value in (1, 22, 65535, "65535"):
-            self.assertIn(parse_port(value), (1, 22, 65535))
-        for value in (0, -1, 65536, True, "22.0", ""):
+        for value in (1, 22, 65535, "65535", "000022"):
+            self.assertIn(parse_port(value), (1, 22, 65535, 22))
+        for value in (0, -1, 65536, True, "22.0", "", "9" * 5000):
             with self.subTest(value=value), self.assertRaises(ExportError):
                 parse_port(value)
 
