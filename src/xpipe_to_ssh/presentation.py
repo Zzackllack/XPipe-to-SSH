@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from .errors import ExportError
 from .models import SSHCommand
-from .rendering import address_kind
+from .rendering import address_kind, provenance
 from .ssh import parse_port, ssh_config_alias
 from .xpipe import (
     WireRecord,
@@ -227,6 +227,29 @@ def render_list(infos: list[WireRecord], *, plain: bool, no_color: bool, json_mo
             *(literal(value) for value in (display_path(info), target, port, kind, store_id(info)))
         )
     console.print(table)
+
+
+def render_provenance(command: SSHCommand, *, plain: bool, no_color: bool) -> None:
+    """Show which XPipe field produced each argument, for reviewing a command.
+
+    With --plain the command is the only thing stdout carries, so the
+    explanation goes to stderr alongside the warnings.
+    """
+    pairs = provenance(command)
+    if RICH_AVAILABLE and not plain and sys.stdout.isatty():
+        console = make_console(no_color=no_color)
+        if console is not None:
+            table = Table(title="Where each argument came from", box=box.ROUNDED, expand=True)
+            table.add_column("Argument", ratio=2, overflow="fold")
+            table.add_column("Source", ratio=3, overflow="fold")
+            for pair in pairs:
+                table.add_row(literal(pair["argument"]), literal(pair["source"]))
+            console.print(table)
+            return
+    stream = sys.stderr if plain else sys.stdout
+    print("argument\tsource", file=stream)
+    for pair in pairs:
+        print(f"{pair['argument']}\t{pair['source']}", file=stream)
 
 
 def read_selection(label: str) -> str:

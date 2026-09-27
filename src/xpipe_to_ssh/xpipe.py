@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 from collections.abc import Callable
 from queue import Empty, Queue
 from threading import Thread
@@ -12,6 +13,35 @@ from typing import cast
 from .errors import XPipeConnectionError, XPipeSchemaError
 
 WireRecord = dict[str, object]
+
+#: Fallback deadline for one XPipe request, in seconds.
+DEFAULT_TIMEOUT = 10.0
+#: Environment override for the same deadline.
+TIMEOUT_ENV = "XPIPE_API_TIMEOUT"
+#: Lets the environment or a config file adjust the deadline once at startup,
+#: instead of threading a timeout through every planner signature.
+_timeout_override: float | None = None
+
+
+def set_request_timeout(seconds: float | None) -> None:
+    """Set (or clear, with None) the deadline used by new adapters."""
+    global _timeout_override
+    _timeout_override = seconds
+
+
+def default_timeout() -> float:
+    """Resolve the request deadline: environment, then configured value.
+
+    The environment is consulted first because it is the more immediate
+    override; the CLI validates it before it ever reaches here.
+    """
+    raw = os.environ.get(TIMEOUT_ENV)
+    if raw is not None:
+        try:
+            return float(raw)
+        except ValueError:
+            return _timeout_override if _timeout_override is not None else DEFAULT_TIMEOUT
+    return _timeout_override if _timeout_override is not None else DEFAULT_TIMEOUT
 
 
 def _has_sync_method(client: object, name: str) -> bool:
@@ -59,9 +89,9 @@ class XPipeAdapter:
         ("connection", "connection_query", "connection_info"),
     )
 
-    def __init__(self, client: object, *, timeout: float = 10.0) -> None:
+    def __init__(self, client: object, *, timeout: float | None = None) -> None:
         self.client = client
-        self.timeout = timeout
+        self.timeout = default_timeout() if timeout is None else timeout
         self._family: tuple[str, str, str] | None = None
 
     @property

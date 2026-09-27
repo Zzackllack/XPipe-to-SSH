@@ -14,6 +14,7 @@ from typing import Never
 from . import __version__
 from .agents import resolve_agent_socket
 from .clipboard import copy_to_clipboard
+from .config import load_settings
 from .errors import (
     EXIT_OK,
     ExecutionError,
@@ -25,17 +26,30 @@ from .errors import (
     XPipeError,
 )
 from .models import AgentSocket, SSHCommand
-from .presentation import RICH_AVAILABLE, choose_host_interactively, render_dashboard, render_list
+from .presentation import (
+    RICH_AVAILABLE,
+    choose_host_interactively,
+    render_dashboard,
+    render_list,
+    render_provenance,
+)
 from .rendering import SHELL_CHOICES, Shell, render
-from .selection import choose_connection, exportable_connections
+from .selection import choose_connection, exportable_connections, store_filter
 from .ssh import build_ssh_argv, dedupe
-from .xpipe import connection_config, connection_type, selectable_texts
+from .xpipe import (
+    TIMEOUT_ENV,
+    connection_config,
+    connection_type,
+    selectable_texts,
+    set_request_timeout,
+)
 
 
 @dataclass(frozen=True)
 class CliOptions:
     connection: str | None
     list_mode: bool
+    list_filter: str | None
     shell: Shell
     ptb: bool
     agent_socket: str
@@ -43,8 +57,11 @@ class CliOptions:
     pick_host: bool
     connect: bool
     remote_command: str | None
+    ssh_args: list[str]
     copy: bool
     plain: bool
+    explain: bool
+    api_timeout: float | None
     strict: bool
     no_color: bool
     debug: bool
@@ -94,21 +111,79 @@ class CliArgumentParser(argparse.ArgumentParser):
 
 
 SHELL_FLAG = "--shell"
+SHELL_ENV = "XPIPE_TO_SSH_SHELL"
+AGENT_SOCKET_ENV = "XPIPE_TO_SSH_AGENT_SOCKET"
+DEFAULT_SHELL: Shell = "auto"
+DEFAULT_AGENT_SOCKET = "auto"
+
+
+def resolve_settings(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> argparse.Namespace:
+    """Fill unset options from the environment and the optional config file.
+
+    Precedence is command line, then environment, then config file, then the
+    built-in default, so an explicit flag is never silently overridden.
+    """
+    settings = load_settings()
+    args.shell = args.shell or os.environ.get(SHELL_ENV) or settings.shell or DEFAULT_SHELL
+    if args.shell not in SHELL_CHOICES:
+        parser.error(f"{SHELL_ENV} must be one of: {', '.join(SHELL_CHOICES)}")
+    args.agent_socket = (
+        args.agent_socket
+        or os.environ.get(AGENT_SOCKET_ENV)
+        or settings.agent_socket
+        or DEFAULT_AGENT_SOCKET
+    )
+    if args.ptb is None:
+        args.ptb = settings.ptb or False
+    # The deadline has no flag. The environment wins over the file, and a bad
+    # value is reported rather than silently falling back to the default.
+    raw_timeout = os.environ.get(TIMEOUT_ENV)
+    if raw_timeout is not None:
+        args.api_timeout = parse_timeout(raw_timeout, TIMEOUT_ENV, parser)
+    else:
+        args.api_timeout = settings.api_timeout
+    if args.api_timeout is not None:
+        set_request_timeout(args.api_timeout)
+    return args
+
+
+def parse_timeout(value: str, origin: str, parser: argparse.ArgumentParser) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        parser.error(f"{origin} must be a number of seconds, got {value!r}")
+    if not 0 < seconds <= 300:
+        parser.error(f"{origin} must be greater than 0 and at most 300 seconds")
+    return seconds
 
 
 def build_parser() -> CliArgumentParser:
     parser = CliArgumentParser(description="Export an XPipe SSH connection as one OpenSSH command")
     parser.add_argument("connection", nargs="?", help="connection name/path or XPipe UUID")
+    parser.add_argument(
+        "ssh_args",
+        nargs="*",
+        help="extra ssh arguments after --, inserted before the destination",
+    )
     parser.add_argument("--list", action="store_true", help="list SSH connections")
+    parser.add_argument(
+        "--filter",
+        metavar="PATTERN",
+        help="only list connections matching a name or glob (requires --list)",
+    )
     parser.add_argument(
         SHELL_FLAG,
         choices=SHELL_CHOICES,
-        default="auto",
-        help="output format (default: auto)",
+        default=None,
+        help=f"output format (default: {DEFAULT_SHELL})",
     )
-    parser.add_argument("--ptb", action="store_true", help="connect to an XPipe PTB build")
     parser.add_argument(
-        "--agent-socket", default="auto", metavar="PATH", help="SSH agent socket, or 'none'"
+        "--ptb", action="store_true", default=None, help="connect to an XPipe PTB build"
+    )
+    parser.add_argument(
+        "--agent-socket", default=None, metavar="PATH", help="SSH agent socket, or 'none'"
     )
     parser.add_argument("--host", metavar="ADDRESS", help="override XPipe's selected host")
     parser.add_argument(
@@ -122,6 +197,11 @@ def build_parser() -> CliArgumentParser:
     )
     parser.add_argument("--copy", action="store_true", help="copy the rendered command")
     parser.add_argument("--plain", action="store_true", help="print only the command")
+    parser.add_argument(
+        "--explain",
+        action="store_true",
+        help="also show which XPipe field produced each argument",
+    )
     parser.add_argument(
         "--strict", action="store_true", help="fail if command generation produces warnings"
     )
@@ -155,10 +235,18 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
     tokens = list(sys.argv[1:] if argv is None else argv)
     parser.json_errors = shell_wants_json(tokens)
     args = parser.parse_args(tokens)
-    # The parsed value is authoritative for the validation errors below.
+    # The --list guard has to know what was typed, not what was resolved: a
+    # configured agent socket is a standing default, not a request to connect.
+    explicit_agent_socket = args.agent_socket
+    # The resolved value is authoritative for the validation errors below.
+    args = resolve_settings(args, parser)
     parser.json_errors = args.shell == "json"
     if args.list and args.connection:
         parser.error("--list cannot be combined with a connection")
+    if args.filter and not args.list:
+        parser.error("--filter requires --list")
+    if args.filter and any(char.isspace() for char in args.filter):
+        parser.error("--filter cannot contain whitespace")
     if args.list and any(
         (
             args.connect,
@@ -166,7 +254,7 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
             args.copy,
             args.host,
             args.pick_host,
-            args.agent_socket != "auto",
+            explicit_agent_socket is not None,
             args.strict,
         )
     ):
@@ -186,11 +274,26 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
             ord(char) < 32 or ord(char) == 127 for char in args.remote_command
         ):
             parser.error("--remote-command must be non-empty and contain no control characters")
+    if args.ssh_args:
+        if args.list:
+            parser.error("-- cannot be combined with --list")
+        if args.remote_command is not None:
+            parser.error("-- cannot be combined with --remote-command")
+        if tokens[:1] == ["--"]:
+            # argparse would bind the first argument after -- to the
+            # connection and silently treat an ssh flag as a connection name.
+            parser.error("-- requires a connection before it")
+        if not args.connection:
+            parser.error("-- requires a connection")
+        for value in args.ssh_args:
+            if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+                parser.error("arguments after -- must be non-empty and free of control characters")
     if not args.list and not args.connection:
         parser.error("provide a connection name/UUID, or use --list")
     return parser, CliOptions(
         connection=args.connection,
         list_mode=args.list,
+        list_filter=args.filter,
         shell=args.shell,
         ptb=args.ptb,
         agent_socket=args.agent_socket,
@@ -198,8 +301,11 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
         pick_host=args.pick_host,
         connect=args.connect,
         remote_command=args.remote_command,
+        ssh_args=list(args.ssh_args),
         copy=args.copy,
         plain=args.plain,
+        explain=args.explain,
+        api_timeout=args.api_timeout,
         strict=args.strict,
         no_color=args.no_color,
         debug=args.debug,
@@ -254,7 +360,7 @@ def prepare_command(client: object, options: CliOptions, deps: AppDependencies) 
         host_override = choose_host_interactively(
             selected_host, available_hosts, no_color=options.no_color
         )
-    command = build_ssh_argv(client, info, host_override=host_override)
+    command = build_ssh_argv(client, info, host_override=host_override, extra_argv=options.ssh_args)
     if command.needs_password_manager_agent:
         agent = deps.agent_resolver(
             options.agent_socket,
@@ -280,7 +386,7 @@ def prepare_command(client: object, options: CliOptions, deps: AppDependencies) 
 def run(options: CliOptions, deps: AppDependencies) -> int:
     client = (deps.client_factory or default_client)(options.ptb)
     if options.list_mode:
-        infos = exportable_connections(client)
+        infos = exportable_connections(client, name_pattern=store_filter(options.list_filter or ""))
         render_list(
             infos, plain=options.plain, no_color=options.no_color, json_mode=options.shell == "json"
         )
@@ -291,7 +397,7 @@ def run(options: CliOptions, deps: AppDependencies) -> int:
     if options.remote_command is not None:
         # OpenSSH sends this as a remote shell command, not a preserved argv vector.
         command.argv.append(options.remote_command)
-    command_text = render(command, options.shell)
+    command_text = render(command, options.shell, explain=options.explain)
     copied = False
     if options.copy:
         deps.clipboard(command_text)
@@ -307,6 +413,9 @@ def run(options: CliOptions, deps: AppDependencies) -> int:
         else:
             for warning in command.warnings:
                 print(f"warning: {warning}", file=sys.stderr)
+        if options.explain:
+            # The session replaces this process, so explain before exec, never after.
+            render_provenance(command, plain=not pretty, no_color=options.no_color)
         env = {**os.environ, **command.env}
         (deps.executor or _execvpe)(command.argv, env)
         return 0
@@ -316,6 +425,9 @@ def run(options: CliOptions, deps: AppDependencies) -> int:
         for warning in command.warnings:
             print(f"warning: {warning}", file=sys.stderr)
         print(command_text)
+    if options.explain and options.shell != "json":
+        # JSON carries provenance inside the payload instead.
+        render_provenance(command, plain=options.plain, no_color=options.no_color)
     return 0
 
 

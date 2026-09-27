@@ -31,6 +31,22 @@ def exportable(info: WireRecord) -> bool:
     }
 
 
+GLOB_CHARACTERS = "*?[]\\"
+
+
+def store_filter(pattern: str) -> str:
+    """Turn a user-supplied name or glob into a daemon-side store filter.
+
+    A plain name becomes a substring glob so the daemon can discard unrelated
+    stores before their details are fetched. A value that already contains
+    glob syntax is trusted as written, and matched locally afterwards.
+    """
+    if any(char in pattern for char in GLOB_CHARACTERS):
+        return pattern
+    stripped = pattern.strip("/")
+    return f"**{stripped}**" if stripped else "**"
+
+
 def exportable_connections(client: object, *, name_pattern: str = "**") -> list[WireRecord]:
     # Filter at the daemon before fetching detailed records for unrelated stores.
     return [
@@ -43,8 +59,7 @@ def choose_connection(client: object, selector: str) -> WireRecord:
         return info_one(client, selector)
 
     needle = selector.casefold().strip("/")
-    safe_filter = not any(char in selector for char in "*?[]\\")
-    name_pattern = f"**{selector.strip('/')}**" if safe_filter else "**"
+    name_pattern = store_filter(selector)
     infos = exportable_connections(client, name_pattern=name_pattern)
     ranked = rank_connections(infos, needle)
     if not ranked and name_pattern != "**":

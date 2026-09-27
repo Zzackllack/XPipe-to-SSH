@@ -43,9 +43,14 @@ List exportable connections:
 
 ```bash
 xpipe-to-ssh --list
-xpipe-to-ssh --list --plain      # tab separated: name, target, port, type, id
+xpipe-to-ssh --list --plain                  # tab separated: name, target, port, type, id
 xpipe-to-ssh --list --shell json
+xpipe-to-ssh --list --filter ggl             # name substring
+xpipe-to-ssh --list --filter '**oracle*'     # glob, passed to the daemon as written
 ```
+
+`--filter` is applied by the daemon before any store details are fetched, so a
+narrow filter is much cheaper than listing everything.
 
 Generate a command using a full connection path, unique leaf name, or XPipe
 store UUID:
@@ -66,6 +71,23 @@ xpipe-to-ssh oracle-oc1 --host 130.61.33.189
 listed menu. A stored port that is absent or null means the SSH default, and a
 stored alternative address that cannot be used safely is reported as a warning
 instead of failing the export.
+
+Review where a command came from, and pass extra `ssh` arguments through:
+
+```bash
+xpipe-to-ssh oracle-oc1 --explain
+xpipe-to-ssh oracle-oc1 --plain --explain      # provenance on stderr, command on stdout
+xpipe-to-ssh oracle-oc1 -- -- -J jump.example  # extra ssh arguments, before the destination
+```
+
+`--explain` prints every argument next to the XPipe field that produced it,
+which is the fastest way to confirm a command does what you expect before
+running it. With `--shell json` the same information appears as a `provenance`
+array; without `--explain` the JSON payload is unchanged.
+
+Arguments after `--` are inserted before the destination, are **not** validated
+against the ssh option grammar, and produce a warning. They cannot be combined
+with `--list` or `--remote-command`.
 
 Use `--plain` for command-only output, `--shell json` for structured output,
 and `--copy` to copy the rendered command:
@@ -123,9 +145,10 @@ Use `--strict` to reject such a command in automation.
   to stderr. The `--pick-host` menu is terminal chrome and also goes to stderr,
   so `--shell json` output stays parseable while selecting an address.
 - JSON command output has `schemaVersion: 1`, `connection`, `env`, `argv`, and
-  `warnings`. JSON listing has `schemaVersion: 1` and `connections` with names,
-  UUIDs, types, hosts, alternative hosts, and ports. A port is `null` when
-  XPipe does not state one or when an `ssh config` host owns its own port.
+  `warnings`, plus `provenance` when `--explain` is given. JSON listing has
+  `schemaVersion: 1` and `connections` with names, UUIDs, types, hosts,
+  alternative hosts, and ports. A port is `null` when XPipe does not state one
+  or when an `ssh config` host owns its own port.
 - JSON failures have `schemaVersion: 1` and an `error` object with a stable
   `code` and `message`. Ambiguous selectors also include `candidates` with
   names and XPipe IDs. They are printed on stdout so agents can parse them.
@@ -142,6 +165,28 @@ Use `--strict` to reject such a command in automation.
 - `--connect` runs the local `ssh` executable from the current environment and
   can open a network session. Tests and the optional smoke workflow do not
   connect to SSH.
+
+## Configuration
+
+Optional, at `$XDG_CONFIG_HOME/xpipe-to-ssh/config.toml`, falling back to
+`~/.config/xpipe-to-ssh/config.toml`. Every key is optional:
+
+```toml
+shell = "posix"              # auto | posix | powershell | json
+agent_socket = "none"        # a path, or "none" to skip agent discovery
+ptb = false                  # talk to an XPipe PTB build
+api_timeout = 10.0           # seconds to wait for one XPipe request
+```
+
+Precedence is command line, then environment, then this file, then the built-in
+default. A missing file is not an error; a malformed one is, because silently
+ignoring it hides why a setting did not apply. Set `XPIPE_TO_SSH_CONFIG` to
+point elsewhere, or to `/dev/null` to bypass the file entirely.
+
+Environment variables: `XPIPE_TO_SSH_SHELL`, `XPIPE_TO_SSH_AGENT_SOCKET`,
+`XPIPE_API_TIMEOUT` (seconds, 0 < value <= 300), and `XPIPE_TO_SSH_CONFIG`.
+The timeout only exists as a setting because the upstream client has no
+timeout parameter, so this CLI bounds every request with a worker thread.
 
 ## Development
 

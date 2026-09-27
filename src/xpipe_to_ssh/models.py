@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 @dataclass
 class IdentityResult:
     argv: list[str] = field(default_factory=list)
+    #: Where each argv entry came from, index-aligned with ``argv``.
+    arg_sources: list[str] = field(default_factory=list)
     username: str | None = None
     auth_methods: list[str] = field(default_factory=list)
     needs_password_manager_agent: bool = False
@@ -35,6 +37,7 @@ class GatewayPlan:
     """The ProxyCommand contribution of an optional gateway hop."""
 
     argv: list[str] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)
     names: list[str] = field(default_factory=list)
     needs_agent: bool = False
     provider: str | None = None
@@ -44,6 +47,9 @@ class GatewayPlan:
 @dataclass
 class SSHCommand:
     argv: list[str]
+    #: Where each argv entry came from, index-aligned with ``argv``. Powers
+    #: --explain so a generated command can be reviewed against its source.
+    arg_sources: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     needs_password_manager_agent: bool = False

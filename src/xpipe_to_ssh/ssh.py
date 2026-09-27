@@ -6,7 +6,7 @@ import ipaddress
 import os
 import re
 import shlex
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 from .agents import provider_hint
 from .errors import ExportError
@@ -128,6 +128,7 @@ def identity_options(client: object, cfg: dict[str, object]) -> IdentityResult:
             raise ExportError("SSH username contains whitespace or control characters")
         result.username = username
         result.argv += ["-l", username]
+        result.arg_sources += ["XPipe identity username", "XPipe identity username"]
 
     key_data = decode_identity_data(client, store.get("sshIdentity"), result.warnings)
     offers_key_material = False
@@ -140,6 +141,7 @@ def identity_options(client: object, cfg: dict[str, object]) -> IdentityResult:
                 raise ExportError("SSH key-file path contains control characters")
             expanded = os.path.expanduser(key_file)
             result.argv += ["-i", expanded]
+            result.arg_sources += ["XPipe identity key file", "XPipe identity key file"]
             result.auth_methods.append(f"Key file: {expanded}")
             offers_key_material = True
         elif normalized == "passwordmanageragent":
@@ -223,6 +225,12 @@ def ssh_config_alias(info: WireRecord, cfg: dict[str, object]) -> str:
     raise ExportError("Could not determine the SSH config alias")
 
 
+#: Provenance labels for --explain, naming where each argv entry came from.
+SSH_EXECUTABLE = "the ssh executable"
+GATEWAY_FORWARDING = "gateway hop forwarding (generated)"
+XPIPE_HOST = "XPipe selected host"
+
+
 def build_ssh_argv(
     client: object,
     info: WireRecord,
@@ -230,6 +238,8 @@ def build_ssh_argv(
     proxy_mode: bool = False,
     visited: set[str] | None = None,
     host_override: str | None = None,
+    host_source: str = XPIPE_HOST,
+    extra_argv: Sequence[str] = (),
     depth: int = 0,
     max_gateway_depth: int = 8,
     platform_name: str | None = None,
@@ -259,13 +269,18 @@ def build_ssh_argv(
     warnings.extend(identity.warnings)
 
     argv = ["ssh"]
+    sources = [SSH_EXECUTABLE]
     if port != 22:
         argv += ["-p", str(port)]
+        sources += ["XPipe port", "XPipe port"]
     argv += identity.argv
+    sources += identity.arg_sources
     if parse_bool(cfg.get("forwardX11"), field="forwardX11"):
         argv.append("-X")
+        sources.append("XPipe forwardX11")
     extra, extra_warnings = parse_additional_options(cfg.get("additionalOptions"))
     argv += extra
+    sources += ["XPipe additionalOptions"] * len(extra)
     warnings.extend(extra_warnings)
 
     gateway = plan_gateway(
@@ -279,11 +294,25 @@ def build_ssh_argv(
         warnings=warnings,
     )
     argv += gateway.argv
+    sources += gateway.sources
     if proxy_mode:
         argv += ["-W", "%h:%p"]
+        sources += [GATEWAY_FORWARDING, GATEWAY_FORWARDING]
+    if extra_argv:
+        # Not validated against the ssh option grammar: ssh itself is the
+        # authority on which flags take a value, and a wrong guess here would
+        # silently drop an argument.
+        argv += list(extra_argv)
+        sources += ["arguments after --"] * len(extra_argv)
+        warnings.append(
+            "Extra ssh arguments were inserted before the destination and were not "
+            "validated: review them, since ssh executes what they enable."
+        )
     argv.append(host)
+    sources.append(host_source)
     return SSHCommand(
         argv=argv,
+        arg_sources=sources,
         warnings=dedupe(warnings),
         needs_password_manager_agent=gateway.needs_agent,
         connection_name=name,
@@ -362,8 +391,10 @@ def plan_gateway(
         if (platform_name or os.name) == "nt"
         else shlex.join(gateway_command.argv)
     )
+    hop = f"XPipe gateway {gateway_command.connection_name}"
     return GatewayPlan(
         argv=["-o", f"ProxyCommand={nested}"],
+        sources=[hop, hop],
         names=[gateway_command.connection_name, *gateway_command.gateway_names],
         needs_agent=plan.needs_agent or gateway_command.needs_password_manager_agent,
         provider=plan.provider or gateway_command.agent_provider,
@@ -391,11 +422,15 @@ def ssh_config_command(
     """Build the command for a connection that defers everything to ~/.ssh/config."""
     alias = ssh_config_alias(info, cfg)
     argv = ["ssh"]
+    sources = [SSH_EXECUTABLE]
     if proxy_mode:
         argv += ["-W", "%h:%p"]
+        sources += [GATEWAY_FORWARDING, GATEWAY_FORWARDING]
     argv.append(alias)
+    sources.append("XPipe ssh config alias")
     return SSHCommand(
         argv=argv,
+        arg_sources=sources,
         connection_name=name,
         connection_id=ref,
         connection_type="sshConfigHost",

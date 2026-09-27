@@ -111,6 +111,13 @@ class LocalProcessError(ExportError):
     exit_code = EXIT_FAILURE
 
 
+class ConfigError(ExportError):
+    """The optional configuration file exists but could not be used."""
+
+    code = "invalid_configuration"
+    exit_code = EXIT_FAILURE
+
+
 class InternalError(ExportError):
     """An unexpected defect; only reachable through the top-level safety net."""
 

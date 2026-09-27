@@ -20,7 +20,7 @@ from xpipe_to_ssh.errors import (
 )
 from xpipe_to_ssh.models import AgentProbe, AgentSocket
 from xpipe_to_ssh.presentation import choose_host_interactively
-from xpipe_to_ssh.rendering import address_kind, render
+from xpipe_to_ssh.rendering import address_kind, provenance, render
 from xpipe_to_ssh.selection import choose_connection, decode_identity_data
 from xpipe_to_ssh.ssh import (
     build_ssh_argv,
@@ -293,6 +293,162 @@ class BehaviorTests(unittest.TestCase):
                 for warning in opaque_command.warnings
             )
         )
+
+    def test_extra_ssh_arguments_land_before_the_destination(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(
+                ["test", "--plain", "--", "-J", "jump.example"],
+                AppDependencies(client_factory=lambda _: SingleClient()),
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            output.getvalue().strip(),
+            "ssh -l alice -J jump.example example.test",
+        )
+
+    def test_extra_ssh_arguments_are_reported_as_unvalidated(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(
+                ["test", "--shell", "json", "--", "-oProxyCommand=touch /tmp/pwned"],
+                AppDependencies(client_factory=lambda _: SingleClient()),
+            )
+
+        warnings = json.loads(output.getvalue())["warnings"]
+        self.assertEqual(result, 0)
+        self.assertTrue(any("not \nvalidated" in w or "not validated" in w for w in warnings))
+
+    def test_double_dash_conflicts_are_rejected(self) -> None:
+        stderr = io.StringIO()
+        deps = AppDependencies(client_factory=lambda _: SingleClient())
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(
+                main(["test", "--connect", "--remote-command", "id", "--", "-J", "x"], deps), 2
+            )
+            self.assertEqual(main(["--list", "--", "-J", "x"], deps), 2)
+            self.assertEqual(main(["--", "-J", "x"], deps), 2)
+            self.assertEqual(main(["test", "--", "-oX", ""], deps), 2)
+        self.assertIn("--remote-command", stderr.getvalue())
+        self.assertIn("before it", stderr.getvalue())
+        self.assertIn("control characters", stderr.getvalue())
+
+    def test_explain_attributes_every_argument_to_its_source(self) -> None:
+        gateway: WireRecord = {
+            "store": "gw",
+            "type": "ssh",
+            "name": ["default", "gw"],
+            "rawData": {
+                "type": "ssh",
+                "host": "gw.example",
+                "port": 22,
+                "identity": {
+                    "type": "inPlace",
+                    "identityStore": {"username": "hop", "sshIdentity": {"type": "none"}},
+                },
+            },
+        }
+        info = direct_info(
+            port=2222,
+            forwardX11=True,
+            additionalOptions="UserKnownHostsFile=/tmp/kh",
+            gateway="gw",
+        )
+
+        class GatewayClient(SingleClient):
+            def store_info(self, refs: list[str]) -> list[dict[str, object]]:
+                return [gateway if ref == "gw" else {**info, "store": ref} for ref in refs]
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            command = build_ssh_argv(GatewayClient(), info, extra_argv=["-J", "jump"])
+
+        pairs = provenance(command)
+        self.assertEqual(len(pairs), len(command.argv))
+        self.assertEqual(
+            dict(zip([p["argument"] for p in pairs], [p["source"] for p in pairs], strict=True))[
+                "2222"
+            ],
+            "XPipe port",
+        )
+        self.assertEqual(pairs[-1], {"argument": "example.test", "source": "XPipe selected host"})
+        self.assertEqual(
+            [p["source"] for p in pairs if p["source"] == "arguments after --"],
+            ["arguments after --", "arguments after --"],
+        )
+        self.assertIn("XPipe gateway default/gw", [p["source"] for p in pairs])
+        self.assertIn("XPipe forwardX11", [p["source"] for p in pairs])
+
+    def test_explain_json_adds_provenance_and_plain_keeps_stdout_clean(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(
+                ["test", "--shell", "json", "--explain"],
+                AppDependencies(client_factory=lambda _: SingleClient()),
+            )
+        payload = json.loads(output.getvalue())
+        self.assertEqual(result, 0)
+        self.assertEqual(len(payload["provenance"]), len(payload["argv"]))
+        self.assertEqual(payload["provenance"][0]["source"], "the ssh executable")
+
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            main(
+                ["test", "--plain", "--explain"],
+                AppDependencies(client_factory=lambda _: SingleClient()),
+            )
+        self.assertEqual(out.getvalue().strip(), "ssh -l alice example.test")
+        self.assertIn("argument\tsource", err.getvalue())
+        self.assertIn("XPipe identity username", err.getvalue())
+
+    def test_explain_is_absent_from_json_unless_requested(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            main(
+                ["test", "--shell", "json"],
+                AppDependencies(client_factory=lambda _: SingleClient()),
+            )
+
+        self.assertNotIn("provenance", json.loads(output.getvalue()))
+
+    def test_list_filter_is_applied_at_the_daemon(self) -> None:
+        class FilteredClient(SingleClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.query_args: list[dict[str, object]] = []
+
+            def store_query(self, **kwargs: object) -> list[str]:
+                self.query_args.append(kwargs)
+                return ["store-id"]
+
+        client = FilteredClient()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(
+                ["--list", "--filter", "ggl"], AppDependencies(client_factory=lambda _: client)
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            client.query_args, [{"categories": "**", "stores": "**ggl**", "types": "ssh*"}]
+        )
+
+    def test_list_filter_passes_glob_syntax_through(self) -> None:
+        from xpipe_to_ssh.selection import store_filter
+
+        self.assertEqual(store_filter("ggl"), "**ggl**")
+        self.assertEqual(store_filter("/nas ds/"), "**nas ds**")
+        self.assertEqual(store_filter("*oracle*"), "*oracle*")
+        self.assertEqual(store_filter("**"), "**")
+
+    def test_filter_requires_list_and_rejects_whitespace(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(main(["test", "--filter", "x"]), 2)
+            self.assertEqual(main(["--list", "--filter", "two words"]), 2)
+        self.assertIn("--filter requires --list", stderr.getvalue())
+        self.assertIn("whitespace", stderr.getvalue())
 
     def test_plain_list_carries_the_same_fields_as_the_table(self) -> None:
         output = io.StringIO()
