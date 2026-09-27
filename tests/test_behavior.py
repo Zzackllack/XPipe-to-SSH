@@ -1,20 +1,47 @@
 import contextlib
 import io
 import json
+import sys
 import tempfile
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
+from unittest import mock
 
 from main import ExportError, build_ssh_argv
 
+from xpipe_to_ssh import presentation
 from xpipe_to_ssh.agents import probe_agent, resolve_agent_socket
-from xpipe_to_ssh.cli import AppDependencies, main
-from xpipe_to_ssh.errors import AgentError, XPipeError, XPipeSchemaError
+from xpipe_to_ssh.cli import AppDependencies, default_client, main
+from xpipe_to_ssh.errors import AgentError, XPipeConnectionError, XPipeError, XPipeSchemaError
 from xpipe_to_ssh.models import AgentSocket
+from xpipe_to_ssh.presentation import choose_host_interactively
 from xpipe_to_ssh.rendering import address_kind, render
 from xpipe_to_ssh.selection import choose_connection
 from xpipe_to_ssh.ssh import parse_bool, parse_port, validate_destination
 from xpipe_to_ssh.xpipe import XPipeAdapter, selected_value
+
+
+@contextlib.contextmanager
+def fake_tty_stdin(text: str) -> Iterator[None]:
+    """Pretend stdin is an interactive terminal that yields ``text`` once."""
+
+    class Tty:
+        def __init__(self) -> None:
+            self.buffer = io.StringIO(text)
+
+        def isatty(self) -> bool:
+            return True
+
+        def readline(self) -> str:
+            return self.buffer.readline()
+
+    original = sys.stdin
+    sys.stdin = Tty()  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        sys.stdin = original
 
 
 def direct_info(**config: object) -> dict[str, object]:
@@ -356,6 +383,92 @@ class BehaviorTests(unittest.TestCase):
         )
         self.assertIsNone(probe.identity_count)
         self.assertIsNotNone(probe.error)
+
+
+class RegressionTests(unittest.TestCase):
+    """Cases that each broke a real export or misreported a real failure."""
+
+    def test_explicit_null_port_falls_back_to_the_ssh_default(self) -> None:
+        # XPipe serializes an unset port as null rather than omitting the key.
+        command = build_ssh_argv(SingleClient(), direct_info(port=None))
+
+        self.assertEqual(command.port, 22)
+        self.assertNotIn("-p", command.argv)
+        self.assertEqual(parse_port(None), 22)
+        self.assertEqual(parse_port(None, default=2222), 2222)
+
+    def test_one_unusable_alternative_address_does_not_fail_the_export(self) -> None:
+        command = build_ssh_argv(
+            SingleClient(),
+            direct_info(
+                host={
+                    "value": "good.example",
+                    "available": ["good.example", "bad host", "10.0.0.1"],
+                }
+            ),
+        )
+
+        self.assertEqual(command.selected_host, "good.example")
+        self.assertEqual(command.argv[-1], "good.example")
+        self.assertEqual(command.available_hosts, ["good.example", "10.0.0.1"])
+        self.assertTrue(any("bad host" in warning for warning in command.warnings))
+
+    def test_unusable_selected_address_is_still_a_hard_failure(self) -> None:
+        with self.assertRaises(ExportError):
+            build_ssh_argv(
+                SingleClient(),
+                direct_info(host={"value": "bad host", "available": ["bad host"]}),
+            )
+
+    def test_unreachable_daemon_is_reported_as_an_xpipe_failure(self) -> None:
+        from xpipe_api.exceptions import NoTokenFoundException
+
+        with mock.patch("xpipe_api.Client", side_effect=NoTokenFoundException("no auth file")):
+            with self.assertRaisesRegex(XPipeConnectionError, "HTTP API"):
+                default_client(False)
+
+    def test_address_selection_rejects_numbers_outside_the_offered_range(self) -> None:
+        available = ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+        with mock.patch.object(presentation, "RICH_AVAILABLE", False):
+            for answer in ("0", "-1", "4", "abc", ""):
+                with self.subTest(answer=answer), fake_tty_stdin(f"{answer}\n"):
+                    with self.assertRaises(ExportError):
+                        choose_host_interactively("10.0.0.1", available, no_color=True)
+
+    def test_address_selection_at_end_of_input_is_not_an_internal_error(self) -> None:
+        available = ["10.0.0.1", "10.0.0.2"]
+        with mock.patch.object(presentation, "RICH_AVAILABLE", False), fake_tty_stdin(""):
+            with self.assertRaises(ExportError):
+                choose_host_interactively("10.0.0.1", available, no_color=True)
+
+    def test_rich_prompt_console_writes_to_stderr(self) -> None:
+        with (
+            mock.patch.object(presentation, "RICH_AVAILABLE", True),
+            mock.patch.object(presentation, "Prompt") as prompt,
+            fake_tty_stdin("2\n"),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            prompt.ask.return_value = "2"
+            chosen = choose_host_interactively("10.0.0.1", ["10.0.0.1", "10.0.0.2"], no_color=True)
+
+        self.assertEqual(chosen, "10.0.0.2")
+        self.assertTrue(prompt.ask.call_args.kwargs["console"].stderr)
+
+    def test_interactive_pick_keeps_json_stdout_parseable(self) -> None:
+        info = direct_info(host={"value": "10.0.0.1", "available": ["10.0.0.1", "10.0.0.2"]})
+        output = io.StringIO()
+        with (
+            mock.patch.object(presentation, "RICH_AVAILABLE", False),
+            fake_tty_stdin("2\n"),
+            contextlib.redirect_stdout(output),
+        ):
+            result = main(
+                ["test", "--shell", "json", "--pick-host"],
+                AppDependencies(client_factory=lambda _: SingleClient(info)),
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(json.loads(output.getvalue())["connection"]["host"], "10.0.0.2")
 
 
 if __name__ == "__main__":

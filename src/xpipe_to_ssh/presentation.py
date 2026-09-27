@@ -214,6 +214,33 @@ def render_list(infos: list[WireRecord], *, plain: bool, no_color: bool, json_mo
     console.print(table)
 
 
+def read_selection(label: str) -> str:
+    """Read one answer without letting the prompt reach stdout.
+
+    ``input()`` always writes its prompt to stdout, which would corrupt
+    ``--shell json`` output, and it raises ``EOFError`` when input ends.
+    """
+    sys.stderr.write(label)
+    sys.stderr.flush()
+    line = sys.stdin.readline()
+    if not line:
+        raise ExportError("No address was selected")
+    return line.strip()
+
+
+def address_by_number(available: list[str], answer: str) -> str:
+    """Map a 1-based menu number to an address, rejecting out-of-range input."""
+    try:
+        index = int(answer.strip()) - 1
+    except ValueError as exc:
+        raise ExportError(f"Invalid address selection {answer!r}; enter a listed number") from exc
+    if not 0 <= index < len(available):
+        raise ExportError(
+            f"Invalid address selection {answer!r}; enter a number between 1 and {len(available)}"
+        )
+    return available[index]
+
+
 def choose_host_interactively(
     current: str | None, available: list[str], *, no_color: bool
 ) -> str | None:
@@ -221,8 +248,9 @@ def choose_host_interactively(
         return current
     if not sys.stdin.isatty():
         raise ExportError("--pick-host requires an interactive terminal")
+    # The menu is terminal chrome: keep stdout reserved for the rendered command.
     if RICH_AVAILABLE:
-        console = make_console(no_color=no_color)
+        console = make_console(no_color=no_color, stderr=True)
         if console is None:
             raise ExportError("Interactive presentation is unavailable")
         table = Table(title="Choose target address", box=box.ROUNDED)
@@ -234,16 +262,16 @@ def choose_host_interactively(
             table.add_row(str(index), host, address_kind(host), "yes" if host == current else "")
         console.print(table)
         default_index = available.index(current) + 1 if current in available else 1
-        choice = Prompt.ask(
-            "Address number",
-            choices=[str(i) for i in range(1, len(available) + 1)],
-            default=str(default_index),
-            console=console,
-        )
-        return available[int(choice) - 1]
+        try:
+            choice = Prompt.ask(
+                "Address number",
+                choices=[str(i) for i in range(1, len(available) + 1)],
+                default=str(default_index),
+                console=console,
+            )
+        except EOFError as exc:
+            raise ExportError("No address was selected") from exc
+        return address_by_number(available, choice)
     for index, host in enumerate(available, 1):
-        print(f"{index}. {host}{' (selected)' if host == current else ''}")
-    try:
-        return available[int(input("Address number: ").strip()) - 1]
-    except (ValueError, IndexError) as exc:
-        raise ExportError("Invalid address selection") from exc
+        print(f"{index}. {host}{' (selected)' if host == current else ''}", file=sys.stderr)
+    return address_by_number(available, read_selection("Address number: "))

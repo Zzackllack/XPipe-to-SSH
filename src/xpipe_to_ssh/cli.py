@@ -211,10 +211,18 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
 
 def default_client(ptb: bool) -> object:
     try:
-        from xpipe_api import Client
+        from xpipe_api import AuthFailedException, Client, NoTokenFoundException
     except ImportError as exc:
         raise XPipeError("Missing xpipe-api dependency. Run: uv sync") from exc
-    return Client(ptb=ptb)
+    try:
+        return Client(ptb=ptb)
+    except (NoTokenFoundException, AuthFailedException) as exc:
+        # The daemon being down or the API being disabled is the single most
+        # common setup failure; report it as such instead of an internal error.
+        raise XPipeConnectionError(
+            "Could not reach the XPipe daemon; check that XPipe is running, unlocked, "
+            f"and that Settings -> HTTP API is enabled: {exc}"
+        ) from exc
 
 
 def _execvpe(argv: list[str], env: dict[str, str]) -> None:
@@ -320,6 +328,10 @@ def main(argv: Sequence[str] | None = None, deps: AppDependencies | None = None)
     except OSError as exc:
         print_error(exc, json_mode=options.shell == "json")
         return 1
+    except KeyboardInterrupt:
+        # Ctrl-C at the interactive host menu is a normal user abort, not a defect.
+        print("aborted", file=sys.stderr)
+        return 130
     except Exception as exc:  # pragma: no cover - a final safety net for integration defects
         print_error(exc, json_mode=options.shell == "json")
         if options.debug:

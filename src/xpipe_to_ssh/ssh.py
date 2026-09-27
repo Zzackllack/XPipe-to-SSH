@@ -56,7 +56,15 @@ def validate_destination(value: str, *, field: str = "SSH host") -> str:
     return value
 
 
-def parse_port(value: object) -> int:
+def parse_port(value: object, *, default: int = 22) -> int:
+    """Read an XPipe port, treating an absent or null value as the SSH default.
+
+    XPipe serializes an unset port as an explicit null rather than dropping the
+    key, so a missing value must not be reported as malformed data. An empty or
+    non-numeric string stays an error: that is bad data, not an absent default.
+    """
+    if value is None:
+        return default
     text = selected_text(value)
     if text is None or not re.fullmatch(r"[0-9]+", text):
         raise ExportError(f"Invalid SSH port {text!r}; expected an integer from 1 to 65535")
@@ -64,6 +72,20 @@ def parse_port(value: object) -> int:
     if not 1 <= port <= 65535:
         raise ExportError(f"Invalid SSH port {port}; expected an integer from 1 to 65535")
     return port
+
+
+def usable_destinations(values: Iterable[str], warnings: list[str]) -> list[str]:
+    """Validate advertised addresses, reporting the unusable ones as warnings."""
+    result: list[str] = []
+    for value in values:
+        try:
+            normalized = validate_destination(value)
+        except ExportError:
+            warnings.append(f"Ignored an unusable XPipe target address: {value!r}.")
+            continue
+        if normalized not in result:
+            result.append(normalized)
+    return result
 
 
 def parse_bool(value: object, *, field: str) -> bool:
@@ -237,11 +259,13 @@ def build_ssh_argv(
         warnings.append(
             f"The manually selected host {host_override!r} was not in XPipe's advertised alternatives."
         )
-    available_hosts = [validate_destination(value) for value in available_hosts]
+    # One stale address in XPipe's alternatives must not break the whole export:
+    # only the selected host is load-bearing for the generated command.
+    available_hosts = usable_destinations(available_hosts, warnings)
     if host not in available_hosts:
         available_hosts.insert(0, host)
 
-    port = parse_port(cfg.get("port", 22))
+    port = parse_port(cfg.get("port"))
     identity = identity_options(client, cfg)
     warnings.extend(identity.warnings)
     argv = ["ssh"]

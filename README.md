@@ -60,6 +60,11 @@ xpipe-to-ssh oracle-oc1 --pick-host
 xpipe-to-ssh oracle-oc1 --host 130.61.33.189
 ```
 
+`--pick-host` needs an interactive terminal and requires a number from the
+listed menu. A stored port that is absent or null means the SSH default, and a
+stored alternative address that cannot be used safely is reported as a warning
+instead of failing the export.
+
 Use `--plain` for command-only output, `--shell json` for structured output,
 and `--copy` to copy the rendered command:
 
@@ -110,7 +115,8 @@ Use `--strict` to reject such a command in automation.
 ## Output and safety contract
 
 - Normal command output is written to stdout; warnings and text-mode errors go
-  to stderr.
+  to stderr. The `--pick-host` menu is terminal chrome and also goes to stderr,
+  so `--shell json` output stays parseable while selecting an address.
 - JSON command output has `schemaVersion: 1`, `connection`, `env`, `argv`, and
   `warnings`. JSON listing has `schemaVersion: 1` and `connections` with names,
   UUIDs, types, hosts, alternative hosts, and ports.
@@ -119,8 +125,9 @@ Use `--strict` to reject such a command in automation.
   names and XPipe IDs. They are printed on stdout so agents can parse them.
 - `--strict` exits with code `2` when command generation has warnings, before
   copying or connecting. JSON errors include the warning list.
-- Exit code `0` means success, `1` means XPipe/local integration failure, and
-  `2` means invalid input, selection, or export data.
+- Exit code `0` means success, `1` means XPipe/local integration failure, `2`
+  means invalid input, selection, or export data, and `130` means the
+  interactive host menu was interrupted with Ctrl-C.
 - XPipe hosts, aliases, usernames, and additional options are treated as
   input to OpenSSH argument construction. Review generated commands before
   executing them, especially command-bearing options such as `ProxyCommand`
