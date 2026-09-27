@@ -43,6 +43,7 @@ List exportable connections:
 
 ```bash
 xpipe-to-ssh --list
+xpipe-to-ssh --list --plain      # tab separated: name, target, port, type, id
 xpipe-to-ssh --list --shell json
 ```
 
@@ -109,6 +110,9 @@ Automatic path discovery currently covers the common macOS Bitwarden and
 1Password sockets, the Unix `SSH_AUTH_SOCK`, and explicit endpoints on
 Windows. Named-pipe/Pageant environments should use `--agent-socket` and are
 not claimed as automatic support until tested on that platform.
+A stored `passwordManagerAgent` identity names a key, not a product, so a
+recognizable agent socket is used unless XPipe names a product that no
+discovered socket matches.
 If a target and its gateway name different password-manager agents, the CLI
 warns because one inherited `SSH_AUTH_SOCK` may not authenticate both hops.
 Use `--strict` to reject such a command in automation.
@@ -120,7 +124,8 @@ Use `--strict` to reject such a command in automation.
   so `--shell json` output stays parseable while selecting an address.
 - JSON command output has `schemaVersion: 1`, `connection`, `env`, `argv`, and
   `warnings`. JSON listing has `schemaVersion: 1` and `connections` with names,
-  UUIDs, types, hosts, alternative hosts, and ports.
+  UUIDs, types, hosts, alternative hosts, and ports. A port is `null` when
+  XPipe does not state one or when an `ssh config` host owns its own port.
 - JSON failures have `schemaVersion: 1` and an `error` object with a stable
   `code` and `message`. Ambiguous selectors also include `candidates` with
   names and XPipe IDs. They are printed on stdout so agents can parse them.
@@ -132,7 +137,8 @@ Use `--strict` to reject such a command in automation.
 - XPipe hosts, aliases, usernames, and additional options are treated as
   input to OpenSSH argument construction. Review generated commands before
   executing them, especially command-bearing options such as `ProxyCommand`
-  and `LocalCommand`.
+  and `LocalCommand`. Untrusted field values are truncated in error messages,
+  so a malformed field cannot flood the output.
 - `--connect` runs the local `ssh` executable from the current environment and
   can open a network session. Tests and the optional smoke workflow do not
   connect to SSH.
