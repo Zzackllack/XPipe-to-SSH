@@ -1,14 +1,13 @@
 import unittest
 
-from main import (
-    ExportError,
-    build_ssh_argv,
-    choose_connection,
+from xpipe_to_ssh.errors import ExportError
+from xpipe_to_ssh.selection import choose_connection
+from xpipe_to_ssh.ssh import build_ssh_argv, identity_options, ssh_config_alias
+from xpipe_to_ssh.xpipe import (
+    WireRecord,
     connection_config,
-    identity_options,
     info_one,
     query_all,
-    ssh_config_alias,
     store_id,
 )
 
@@ -154,7 +153,7 @@ class CompatibilityTests(unittest.TestCase):
         self.assertIn("ProxyCommand=ssh -W %h:%p gateway.example", command.argv)
 
     def test_v24_ssh_config_alias_uses_host_entry_name(self) -> None:
-        info = {
+        info: WireRecord = {
             "store": "config-id",
             "name": ["default", "ssh config", "server-alias"],
             "rawData": {"hostEntry": {"name": "server-alias"}},

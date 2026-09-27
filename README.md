@@ -33,8 +33,9 @@ uv run xpipe-to-ssh --help
 ```
 
 To put `xpipe-to-ssh` on your PATH, run `uv tool install .` from the checkout.
-`uv run python main.py` remains available as a compatibility entry point for
-older scripts.
+The older `python main.py` entry point has been removed; scripts that used it
+should call the installed `xpipe-to-ssh` command or
+`python -m xpipe_to_ssh` instead.
 
 ## Usage
 

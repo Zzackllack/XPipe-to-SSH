@@ -8,17 +8,27 @@ from collections.abc import Iterator
 from pathlib import Path
 from unittest import mock
 
-from main import ExportError, build_ssh_argv
-
 from xpipe_to_ssh import agents, presentation
 from xpipe_to_ssh.agents import probe_agent, resolve_agent_socket
 from xpipe_to_ssh.cli import AppDependencies, default_client, main
-from xpipe_to_ssh.errors import AgentError, XPipeConnectionError, XPipeError, XPipeSchemaError
+from xpipe_to_ssh.errors import (
+    AgentError,
+    ExportError,
+    XPipeConnectionError,
+    XPipeError,
+    XPipeSchemaError,
+)
 from xpipe_to_ssh.models import AgentProbe, AgentSocket
 from xpipe_to_ssh.presentation import choose_host_interactively
 from xpipe_to_ssh.rendering import address_kind, render
 from xpipe_to_ssh.selection import choose_connection, decode_identity_data
-from xpipe_to_ssh.ssh import identity_options, parse_bool, parse_port, validate_destination
+from xpipe_to_ssh.ssh import (
+    build_ssh_argv,
+    identity_options,
+    parse_bool,
+    parse_port,
+    validate_destination,
+)
 from xpipe_to_ssh.xpipe import XPipeAdapter, connection_config, selected_value
 
 
