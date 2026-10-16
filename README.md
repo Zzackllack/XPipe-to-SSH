@@ -21,7 +21,8 @@ XPipe UUIDs remain the most reliable selector for automation.
 The dependency `xpipe-api>=0.1.34` supports XPipe 24's store API. A local
 client uses XPipe's local authentication file automatically. Remote XPipe
 instances require the client to be configured with a token and base URL; this
-CLI intentionally constructs the local client only.
+CLI intentionally constructs the local client only. `pyyaml` renders the YAML
+and Ansible inventory exports.
 
 ## Installation
 
@@ -50,7 +51,7 @@ xpipe-to-ssh --list --filter '**oracle*'     # glob, passed to the daemon as wri
 ```
 
 `--filter` is applied by the daemon before any store details are fetched, so a
-narrow filter is much cheaper than listing everything.
+narrow filter is much cheaper than listing or exporting everything.
 
 Generate a command using a full connection path, unique leaf name, or XPipe
 store UUID:
@@ -114,6 +115,46 @@ OpenSSH passes this string to the remote shell. Shell operators and expansions
 in it run remotely; the CLI does not promise separate, safely quoted remote
 arguments. Use a fixed or deliberately constructed command string.
 
+## Bulk export
+
+Export every saved connection at once instead of one command at a time. A
+`--filter` narrows the set at the daemon, exactly as with `--list`.
+
+```bash
+xpipe-to-ssh --export ssh-config                              # OpenSSH config on stdout
+xpipe-to-ssh --export ssh-config --output ~/.ssh/config.d/xpipe.conf
+xpipe-to-ssh --export yaml --output hosts.yaml
+xpipe-to-ssh --export ansible --output inventory.yml
+xpipe-to-ssh --export json --filter '**prod**'
+```
+
+Formats:
+
+- `ssh-config` - an OpenSSH client config. Each connection becomes a
+  `Host <alias>` block with `HostName`, `User`, `Port`, `IdentityFile`,
+  `ForwardX11`, a `ProxyCommand` for a gateway hop, and any
+  `additionalOptions`. The alias is the full XPipe path with whitespace and
+  glob characters folded to `-`, for example `Host default/oracle-oc1`.
+  Include the generated file from `~/.ssh/config`.
+- `yaml` - the same fields as an ordered `hosts:` list, for tooling that reads
+  a `hosts.yaml`/`hosts.yml`.
+- `ansible` - an Ansible inventory (`all.hosts`) with `ansible_host`,
+  `ansible_user`, `ansible_port`, `ansible_ssh_private_key_file`, and
+  `ansible_ssh_common_args` for gateways and extra options.
+- `json` - structured output with `schemaVersion` and `generator`.
+
+`--output PATH` writes the document to a file instead of stdout; `-` means
+stdout. An existing file is never overwritten unless `--force` is given, and a
+new file is written to a temporary name and moved into place with mode `0600`,
+because it can name key files and carry a `ProxyCommand`.
+
+XPipe stores of type `sshConfigHost` already resolve through `~/.ssh/config`,
+so they are skipped with a warning rather than re-exported as a self-reference.
+A connection with unusable data is skipped and reported as a warning, so one
+broken store cannot sink the whole export; `--strict` turns any warning into a
+failure. No password, passphrase, or decrypted identity payload is ever
+written.
+
 ## Authentication and agents
 
 Password values stored by XPipe are not placed in argv, JSON, environment
@@ -148,14 +189,19 @@ Use `--strict` to reject such a command in automation.
   `warnings`, plus `provenance` when `--explain` is given. JSON listing has
   `schemaVersion: 1` and `connections` with names, UUIDs, types, hosts,
   alternative hosts, and ports. A port is `null` when XPipe does not state one
-  or when an `ssh config` host owns its own port.
+  or when an `ssh config` host owns its own port. `--export json` has its own
+  `schemaVersion: 1` document with `generator` and a `hosts` array.
+- Bulk export writes the document to stdout, or to `--output`; warnings and the
+  `wrote ...` line go to stderr, so a redirected document stays clean.
 - JSON failures have `schemaVersion: 1` and an `error` object with a stable
   `code` and `message`. Ambiguous selectors also include `candidates` with
   names and XPipe IDs. They are printed on stdout so agents can parse them.
-- `--strict` exits with code `2` when command generation has warnings, before
-  copying or connecting. JSON errors include the warning list.
-- Exit code `0` means success, `1` means XPipe/local integration failure, `2`
-  means invalid input, selection, or export data, and `130` means the
+- `--strict` exits with code `2` when command generation has warnings, or when
+  a bulk export skipped a connection, before copying, connecting, or writing.
+  JSON errors include the warning list.
+- Exit code `0` means success, `1` means XPipe/local integration failure
+  (including an output file that could not be written or would be clobbered),
+  `2` means invalid input, selection, or export data, and `130` means the
   interactive host menu was interrupted with Ctrl-C.
 - XPipe hosts, aliases, usernames, and additional options are treated as
   input to OpenSSH argument construction. Review generated commands before

@@ -27,6 +27,10 @@ gateway depth/cycles, and additional SSH options. It keeps password values
 out of generated argv and JSON. Provider and identifier metadata from a
 password-manager identity is used when choosing an agent socket.
 
+Bulk export (`--export ssh-config|yaml|ansible|json`) reuses that validated
+command planner for every store, so an exported file cannot disagree with the
+command the CLI would run for the same connection.
+
 ## Compatibility matrix
 
 | Component | Supported policy | Verification |
@@ -35,6 +39,7 @@ password-manager identity is used when choosing an agent socket.
 | Older API | v23 fallback retained | Unit fake client |
 | Python client | `xpipe-api>=0.1.34` | Lock resolves 0.1.35 |
 | SSH output | POSIX, PowerShell, JSON | Unit coverage; platform runtime still requires host testing |
+| Bulk export | SSH config, hosts YAML, Ansible, JSON | Unit coverage; SSH config parsed by OpenSSH `ssh -G` |
 | SSH agents | Common Unix sockets and explicit paths | Unit coverage; provider/platform matrix is intentionally conservative |
 
 ## Validation policy
