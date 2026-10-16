@@ -9,7 +9,8 @@ import sys
 import traceback
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Never
+from pathlib import Path
+from typing import Never, cast
 
 from . import __version__
 from .agents import resolve_agent_socket
@@ -24,6 +25,14 @@ from .errors import (
     StrictWarningsError,
     XPipeConnectionError,
     XPipeError,
+)
+from .export import (
+    EXPORT_CHOICES,
+    STDOUT_TARGET,
+    ExportFormat,
+    collect_export,
+    render_export,
+    write_document,
 )
 from .models import AgentSocket, SSHCommand
 from .presentation import (
@@ -50,6 +59,9 @@ class CliOptions:
     connection: str | None
     list_mode: bool
     list_filter: str | None
+    export: ExportFormat | None
+    output: str | None
+    force: bool
     shell: Shell
     ptb: bool
     agent_socket: str
@@ -160,7 +172,9 @@ def parse_timeout(value: str, origin: str, parser: argparse.ArgumentParser) -> f
 
 
 def build_parser() -> CliArgumentParser:
-    parser = CliArgumentParser(description="Export an XPipe SSH connection as one OpenSSH command")
+    parser = CliArgumentParser(
+        description="Export an XPipe SSH connection as one OpenSSH command, or all of them as a config file"
+    )
     parser.add_argument("connection", nargs="?", help="connection name/path or XPipe UUID")
     parser.add_argument(
         "ssh_args",
@@ -171,7 +185,25 @@ def build_parser() -> CliArgumentParser:
     parser.add_argument(
         "--filter",
         metavar="PATTERN",
-        help="only list connections matching a name or glob (requires --list)",
+        help="only list or export connections matching a name or glob (requires --list or --export)",
+    )
+    parser.add_argument(
+        "--export",
+        choices=EXPORT_CHOICES,
+        default=None,
+        metavar="FORMAT",
+        help="export every connection as FORMAT (" + ", ".join(EXPORT_CHOICES) + ")",
+    )
+    parser.add_argument(
+        "--output",
+        metavar="PATH",
+        default=None,
+        help="write --export output to PATH instead of stdout ('-' means stdout)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite an existing --output file",
     )
     parser.add_argument(
         SHELL_FLAG,
@@ -203,7 +235,9 @@ def build_parser() -> CliArgumentParser:
         help="also show which XPipe field produced each argument",
     )
     parser.add_argument(
-        "--strict", action="store_true", help="fail if command generation produces warnings"
+        "--strict",
+        action="store_true",
+        help="fail if command generation or export produces warnings",
     )
     parser.add_argument("--no-color", action="store_true", help="disable terminal colors")
     parser.add_argument(
@@ -243,10 +277,16 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
     parser.json_errors = args.shell == "json"
     if args.list and args.connection:
         parser.error("--list cannot be combined with a connection")
-    if args.filter and not args.list:
-        parser.error("--filter requires --list")
+    if args.list and args.export:
+        parser.error("--list and --export are mutually exclusive")
+    if args.filter and not (args.list or args.export):
+        parser.error("--filter requires --list or --export")
     if args.filter and any(char.isspace() for char in args.filter):
         parser.error("--filter cannot contain whitespace")
+    if args.output and not args.export:
+        parser.error("--output requires --export")
+    if args.force and not (args.export and args.output):
+        parser.error("--force requires --export and --output")
     if args.list and any(
         (
             args.connect,
@@ -259,6 +299,21 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
         )
     ):
         parser.error("--list cannot be combined with connection-only options")
+    if args.export and any(
+        (
+            args.connection,
+            args.connect,
+            args.remote_command is not None,
+            args.copy,
+            args.host,
+            args.pick_host,
+            args.plain,
+            args.explain,
+            explicit_agent_socket is not None,
+            args.ssh_args,
+        )
+    ):
+        parser.error("--export cannot be combined with connection-only options")
     if args.host and args.pick_host:
         parser.error("--host and --pick-host are mutually exclusive")
     if args.connect and args.list:
@@ -275,8 +330,8 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
         ):
             parser.error("--remote-command must be non-empty and contain no control characters")
     if args.ssh_args:
-        if args.list:
-            parser.error("-- cannot be combined with --list")
+        if args.list or args.export:
+            parser.error("-- cannot be combined with --list or --export")
         if args.remote_command is not None:
             parser.error("-- cannot be combined with --remote-command")
         if tokens[:1] == ["--"]:
@@ -288,12 +343,15 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
         for value in args.ssh_args:
             if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
                 parser.error("arguments after -- must be non-empty and free of control characters")
-    if not args.list and not args.connection:
-        parser.error("provide a connection name/UUID, or use --list")
+    if not args.list and not args.export and not args.connection:
+        parser.error("provide a connection name/UUID, use --list, or use --export")
     return parser, CliOptions(
         connection=args.connection,
         list_mode=args.list,
         list_filter=args.filter,
+        export=cast(ExportFormat, args.export) if args.export else None,
+        output=args.output,
+        force=args.force,
         shell=args.shell,
         ptb=args.ptb,
         agent_socket=args.agent_socket,
@@ -383,6 +441,24 @@ def prepare_command(client: object, options: CliOptions, deps: AppDependencies) 
     return command
 
 
+def run_export(client: object, options: CliOptions, fmt: ExportFormat) -> int:
+    """Export every matching connection as one document or file."""
+    infos = exportable_connections(client, name_pattern=store_filter(options.list_filter or ""))
+    result = collect_export(client, infos)
+    if options.strict and result.warnings:
+        raise StrictWarningsError(result.warnings)
+    for warning in result.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    document = render_export(result, fmt)
+    if options.output and options.output != STDOUT_TARGET:
+        target = Path(options.output)
+        write_document(document, target, force=options.force)
+        print(f"wrote {target} ({len(result.hosts)} connection(s))", file=sys.stderr)
+    else:
+        sys.stdout.write(document)
+    return 0
+
+
 def run(options: CliOptions, deps: AppDependencies) -> int:
     client = (deps.client_factory or default_client)(options.ptb)
     if options.list_mode:
@@ -391,6 +467,8 @@ def run(options: CliOptions, deps: AppDependencies) -> int:
             infos, plain=options.plain, no_color=options.no_color, json_mode=options.shell == "json"
         )
         return 0
+    if options.export:
+        return run_export(client, options, options.export)
     command = prepare_command(client, options, deps)
     if options.strict and command.warnings:
         raise StrictWarningsError(command.warnings)

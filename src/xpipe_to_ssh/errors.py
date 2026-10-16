@@ -118,6 +118,13 @@ class ConfigError(ExportError):
     exit_code = EXIT_FAILURE
 
 
+class ExportOutputError(ExportError):
+    """A bulk export file could not be written, or would clobber one."""
+
+    code = "export_output_failed"
+    exit_code = EXIT_FAILURE
+
+
 class InternalError(ExportError):
     """An unexpected defect; only reachable through the top-level safety net."""
 
