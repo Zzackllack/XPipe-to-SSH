@@ -370,7 +370,10 @@ def write_document(text: str, target: Path, *, force: bool) -> None:
         )
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             stream.write(text)
-        os.chmod(temporary, 0o600)
+        if os.name != "nt":
+            # Windows has no POSIX mode bits; mkstemp already restricts access
+            # there, and chmod would only toggle the read-only flag.
+            os.chmod(temporary, 0o600)
         os.replace(temporary, target)
     except OSError as exc:
         raise ExportOutputError(f"Could not write {target}: {exc}") from exc

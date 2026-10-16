@@ -3,6 +3,7 @@
 import contextlib
 import io
 import json
+import os
 import stat
 import tempfile
 import unittest
@@ -391,7 +392,7 @@ class CliExportTests(unittest.TestCase):
 
 
 class OutputFileTests(unittest.TestCase):
-    def test_export_writes_a_private_file_and_creates_parents(self) -> None:
+    def test_export_writes_a_file_and_creates_parents(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "config.d" / "xpipe.conf"
 
@@ -403,6 +404,14 @@ class OutputFileTests(unittest.TestCase):
             self.assertEqual(out, "")
             self.assertIn("wrote", err)
             self.assertIn("Host default/alpha", target.read_text())
+
+    @unittest.skipIf(os.name == "nt", "Windows does not enforce POSIX file modes")
+    def test_export_file_is_private_on_posix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "hosts.yaml"
+
+            run_export(["--export", "yaml", "--output", str(target)], sample_client())
+
             self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
 
     def test_existing_file_is_not_clobbered_without_force(self) -> None:
