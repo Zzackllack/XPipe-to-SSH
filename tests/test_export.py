@@ -675,6 +675,124 @@ class AgentExportTests(unittest.TestCase):
         self.assertIn('    IdentityAgent "/tmp/my agents/agent.sock"', text)
 
 
+class TtyStderr(io.StringIO):
+    """A StringIO that Rich treats as a terminal."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+class ExportTuiTests(unittest.TestCase):
+    def test_pretty_export_renders_a_summary_on_a_tty(self) -> None:
+        client = sample_client()
+        out, err = io.StringIO(), TtyStderr()
+        with contextlib.redirect_stdout(out), mock.patch("sys.stderr", err):
+            result = main(
+                ["--export", "ssh-config"],
+                AppDependencies(client_factory=lambda _: client),
+            )
+
+        self.assertEqual(result, 0)
+        rendered = err.getvalue()
+        self.assertIn("XPipe", rendered)
+        self.assertIn("Exported (4)", rendered)
+        self.assertIn("default/alpha", rendered)
+        self.assertIn("alpha.example", rendered)
+        # Pretty mode replaces the plain warning lines with panels.
+        self.assertNotIn("warning: ", rendered)
+        # The document itself stays untouched on stdout.
+        self.assertIn("Host default/alpha", out.getvalue())
+
+    def test_pretty_export_lists_skipped_connections_in_their_own_panel(self) -> None:
+        broken = ssh_info("bad", "default", "bad", host="bad host")
+        client = MultiClient([broken, ssh_info("good", "default", "good")])
+        out, err = io.StringIO(), TtyStderr()
+        with contextlib.redirect_stdout(out), mock.patch("sys.stderr", err):
+            result = main(
+                ["--export", "ssh-config"],
+                AppDependencies(client_factory=lambda _: client),
+            )
+
+        self.assertEqual(result, 0)
+        rendered = err.getvalue()
+        self.assertIn("Skipped (1)", rendered)
+        self.assertIn("default/bad", rendered)
+        self.assertIn("default/good", rendered)
+
+    def test_pretty_export_shows_the_agent_provider_per_connection(self) -> None:
+        client = MultiClient([agent_info("a", "default", "alpha")])
+        out, err = io.StringIO(), TtyStderr()
+        with contextlib.redirect_stdout(out), mock.patch("sys.stderr", err):
+            result = main(
+                ["--export", "ssh-config"],
+                AppDependencies(
+                    client_factory=lambda _: client,
+                    agent_resolver=lambda *_a, **_k: AgentSocket(
+                        "/Users/zacklack/.bitwarden-ssh-agent.sock",
+                        "Bitwarden",
+                        2,
+                        provider="bitwarden",
+                    ),
+                ),
+            )
+
+        self.assertEqual(result, 0)
+        self.assertIn("Bitwarden", err.getvalue())
+
+    def test_pretty_export_with_no_color_emits_no_ansi(self) -> None:
+        out, err = io.StringIO(), TtyStderr()
+        with contextlib.redirect_stdout(out), mock.patch("sys.stderr", err):
+            result = main(
+                ["--export", "ssh-config", "--no-color"],
+                AppDependencies(client_factory=lambda _: sample_client()),
+            )
+
+        self.assertEqual(result, 0)
+        rendered = err.getvalue()
+        # --no-color strips hues; Rich still emits bold/dim emphasis by design.
+        for hue in (
+            "\x1b[31m",
+            "\x1b[32m",
+            "\x1b[33m",
+            "\x1b[34m",
+            "\x1b[35m",
+            "\x1b[36m",
+            "\x1b[37m",
+        ):
+            self.assertNotIn(hue, rendered)
+
+    def test_shell_json_export_never_renders_panels(self) -> None:
+        out, err = io.StringIO(), TtyStderr()
+        with contextlib.redirect_stdout(out), mock.patch("sys.stderr", err):
+            result = main(
+                ["--export", "json", "--shell", "json"],
+                AppDependencies(client_factory=lambda _: sample_client()),
+            )
+
+        self.assertEqual(result, 0)
+        self.assertNotIn("Exported", err.getvalue())
+        self.assertEqual(json.loads(out.getvalue())["schemaVersion"], 1)
+
+    def test_json_export_alone_keeps_chrome_on_stderr_and_document_on_stdout(self) -> None:
+        out, err = io.StringIO(), TtyStderr()
+        with contextlib.redirect_stdout(out), mock.patch("sys.stderr", err):
+            result = main(
+                ["--export", "json"],
+                AppDependencies(client_factory=lambda _: sample_client()),
+            )
+
+        self.assertEqual(result, 0)
+        self.assertIn("Exported (4)", err.getvalue())
+        self.assertEqual(json.loads(out.getvalue())["schemaVersion"], 1)
+
+    def test_plain_output_is_unchanged_when_stderr_is_not_a_tty(self) -> None:
+        client = MultiClient([ssh_info("bad", "default", "bad", host="bad host")])
+        _result, _out, err = run_export(["--export", "ssh-config"], client)
+
+        self.assertIn("warning: ", err)
+        self.assertEqual(_result, 0)
+
+
 class PickHostsExportTests(unittest.TestCase):
     def multi_host_client(self) -> MultiClient:
         return MultiClient(

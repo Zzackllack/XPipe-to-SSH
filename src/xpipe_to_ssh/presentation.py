@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .agents import provider_for_path
 from .errors import ExportError
 from .models import SSHCommand
 from .rendering import address_kind, provenance
@@ -23,6 +26,8 @@ from .xpipe import (
 if TYPE_CHECKING:
     from rich.console import Console
     from rich.table import Table
+
+    from .export import ExportFormat, ExportResult
 
 try:
     from rich import box
@@ -317,3 +322,84 @@ def choose_host_interactively(
     for index, host in enumerate(available, 1):
         print(f"{index}. {host}{' (selected)' if host == current else ''}", file=sys.stderr)
     return address_by_number(available, read_selection("Address number: "))
+
+
+_EXPORT_TITLES = {
+    "ssh-config": "SSH config",
+    "yaml": "YAML",
+    "json": "JSON",
+    "ansible": "Ansible inventory",
+}
+
+#: Skipped-connection warnings carry a stable prefix; give them their own panel.
+_SKIPPED_RE = re.compile(r"^Skipped '(.+?)': (.+)$")
+
+
+def render_export_summary(
+    result: ExportResult,
+    fmt: ExportFormat,
+    *,
+    no_color: bool = False,
+) -> None:
+    """Render the export outcome as panels on stderr.
+
+    The document itself stays on stdout; this is chrome for humans watching a
+    terminal. Skipped connections get their own table, remaining warnings the
+    same treatment as command warnings, and scripts keep the plain output.
+    """
+    if not RICH_AVAILABLE:
+        for warning in result.warnings:
+            print(f"warning: {warning}", file=sys.stderr)
+        return
+    console = make_console(no_color=no_color, stderr=True)
+    if console is None:
+        for warning in result.warnings:
+            print(f"warning: {warning}", file=sys.stderr)
+        return
+    hosts = result.hosts
+    skipped: list[tuple[str, str]] = []
+    notes: list[str] = []
+    for warning in result.warnings:
+        match = _SKIPPED_RE.match(warning)
+        if match:
+            skipped.append((match.group(1), match.group(2)))
+        else:
+            notes.append(warning)
+
+    title = Text(f"XPipe  →  {_EXPORT_TITLES[fmt]}", style="bold")
+    subtitle = literal(f"{len(hosts)} connection(s)", style="cyan")
+    console.print(Panel.fit(Group(title, subtitle), border_style="cyan", padding=(0, 2)))
+
+    if hosts:
+        table = Table(title=f"Exported ({len(hosts)})", box=box.ROUNDED, expand=True)
+        table.add_column("Connection", ratio=3, overflow="fold")
+        table.add_column("Target", ratio=2, overflow="fold")
+        table.add_column("Port", width=6, justify="right")
+        table.add_column("Agent", width=12, no_wrap=True)
+        for host in hosts:
+            agent = provider_for_path(Path(host.identity_agent))[0] if host.identity_agent else "—"
+            port = host.fields.port
+            table.add_row(
+                literal(host.name),
+                literal(host.fields.hostname),
+                literal(str(port) if port is not None else "—"),
+                literal(agent),
+            )
+        console.print(table)
+    if skipped:
+        skipped_table = Table(title=f"Skipped ({len(skipped)})", box=box.ROUNDED, expand=True)
+        skipped_table.add_column("Connection", ratio=2, overflow="fold")
+        skipped_table.add_column("Reason", ratio=3, overflow="fold")
+        for name, reason in skipped:
+            skipped_table.add_row(literal(name), literal(reason))
+        console.print(skipped_table)
+    if notes:
+        lines = []
+        for note in notes:
+            line = Text()
+            line.append("! ", style="bold yellow")
+            line.append(note)
+            lines.append(line)
+        console.print(Panel(Group(*lines), title=f"Warnings ({len(notes)})", border_style="yellow"))
+    if not hosts and not skipped and not notes:
+        console.print(literal("No exportable connections.", style="dim"))

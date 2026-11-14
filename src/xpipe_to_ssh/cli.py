@@ -33,6 +33,7 @@ from .export import (
     EXPORT_CHOICES,
     STDOUT_TARGET,
     ExportFormat,
+    ExportResult,
     collect_export,
     render_export,
     write_document,
@@ -41,7 +42,9 @@ from .models import AgentSocket, SSHCommand
 from .presentation import (
     RICH_AVAILABLE,
     choose_host_interactively,
+    make_console,
     render_dashboard,
+    render_export_summary,
     render_list,
     render_provenance,
 )
@@ -479,17 +482,35 @@ def run_export(
                 current, available, no_color=options.no_color, flag_name="--pick-hosts"
             )
 
-    result = collect_export(
-        client,
-        infos,
-        agent_resolver=deps.agent_resolver,
-        agent_socket=options.agent_socket,
-        host_picker=picker,
+    stderr_rich = (
+        make_console(no_color=options.no_color, stderr=True)
+        if RICH_AVAILABLE and options.shell != "json" and sys.stderr.isatty()
+        else None
     )
+
+    def collect() -> ExportResult:
+        return collect_export(
+            client,
+            infos,
+            agent_resolver=deps.agent_resolver,
+            agent_socket=options.agent_socket,
+            host_picker=picker,
+        )
+
+    if stderr_rich is not None and not options.pick_hosts:
+        # The user is away while the daemon is probed; menus would clash with
+        # a live spinner, so interactive runs get no spinner.
+        with stderr_rich.status("Exporting connections…", spinner="dots"):
+            result = collect()
+    else:
+        result = collect()
     if options.strict and result.warnings:
         raise StrictWarningsError(result.warnings)
-    for warning in result.warnings:
-        print(f"warning: {warning}", file=sys.stderr)
+    if stderr_rich is not None:
+        render_export_summary(result, fmt, no_color=options.no_color)
+    else:
+        for warning in result.warnings:
+            print(f"warning: {warning}", file=sys.stderr)
     document = render_export(result, fmt)
     if options.output and options.output != STDOUT_TARGET:
         target = Path(options.output)

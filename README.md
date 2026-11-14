@@ -137,7 +137,15 @@ arguments. Use a fixed or deliberately constructed command string.
 ## Bulk export
 
 Export every saved connection at once instead of one command at a time. A
-`--filter` narrows the set at the daemon, exactly as with `--list`.
+`--filter` narrows the set at the daemon, exactly as with `--list`. On an
+interactive terminal the export shows a summary on stderr while it runs and
+after it finishes: a header, a table of exported connections with their
+ports and agent bindings, a `Skipped` table for connections that could not
+be exported, and the usual warnings. The document itself stays on stdout, so
+`xpipe-to-ssh --export ssh-config > ssh.conf` works as before; the summary is
+terminal chrome only. Non-interactive terminals and `--shell json` keep the
+plain `warning:` lines, and `--pick-hosts` menus are shown instead of the
+spinner while you answer.
 
 ```bash
 xpipe-to-ssh --export ssh-config                              # OpenSSH config on stdout
@@ -236,7 +244,9 @@ Use `--strict` to reject such a command in automation.
   or when an `ssh config` host owns its own port. `--export json` has its own
   `schemaVersion: 1` document with `generator` and a `hosts` array.
 - Bulk export writes the document to stdout, or to `--output`; warnings and the
-  `wrote ...` line go to stderr, so a redirected document stays clean.
+  `wrote ...` line go to stderr, so a redirected document stays clean. On a
+  terminal, the summary panels go to stderr as well, so stdout never carries
+  chrome either.
 - JSON failures have `schemaVersion: 1` and an `error` object with a stable
   `code` and `message`. Ambiguous selectors also include `candidates` with
   names and XPipe IDs. They are printed on stdout so agents can parse them.

@@ -31,7 +31,9 @@ def provider_hint(provider: str | None, identifier: str | None) -> str | None:
     return None
 
 
-def _provider_for(path: Path) -> tuple[str, str | None]:
+def provider_for_path(path: Path) -> tuple[str, str | None]:
+    """Best-effort label and provider name for a discovered agent socket."""
+
     normalized = str(path).casefold()
     if "bitwarden" in normalized:
         return "Bitwarden", "bitwarden"
@@ -116,7 +118,7 @@ def probe_agent(
 
 
 def _socket(path: Path, probe: AgentProbe) -> AgentSocket:
-    label, provider = _provider_for(path)
+    label, provider = provider_for_path(path)
     return AgentSocket(
         str(path),
         label,
