@@ -14,11 +14,23 @@ from pathlib import Path
 from subprocess import Popen
 from typing import Never, cast
 
+try:
+    from rich_argparse import RichHelpFormatter
+
+    class _HelpFormatter(RichHelpFormatter):
+        # Bracket-heavy help texts must not be parsed as console markup.
+        help_markup = False
+        text_markup = False
+
+    _HELP_FORMATTER: type[argparse.HelpFormatter] = _HelpFormatter
+except ImportError:  # pragma: no cover - exercised in minimal installations
+    _HELP_FORMATTER = argparse.HelpFormatter
+
 from . import __version__
 from .agents import attach_agent, resolve_agent_socket
 from .clipboard import copy_to_clipboard
 from .config import load_settings
-from .daemon import confirm_open, ensure_client
+from .daemon import ensure_client
 from .errors import (
     EXIT_OK,
     ExecutionError,
@@ -42,10 +54,13 @@ from .models import AgentSocket, SSHCommand
 from .presentation import (
     RICH_AVAILABLE,
     choose_host_interactively,
-    make_console,
+    chrome_console,
+    confirm_open,
     render_dashboard,
+    render_error,
     render_export_summary,
     render_list,
+    render_note,
     render_provenance,
 )
 from .rendering import SHELL_CHOICES, Shell, render
@@ -107,8 +122,10 @@ def error_code(exc: Exception) -> str:
     return InternalError.code
 
 
-def print_error(exc: Exception, *, json_mode: bool) -> None:
+def print_error(exc: Exception, *, json_mode: bool, no_color: bool = False) -> None:
     if not json_mode:
+        if render_error(str(exc), no_color=no_color):
+            return
         print(f"error: {exc}", file=sys.stderr)
         return
     detail: dict[str, object] = {"code": error_code(exc), "message": str(exc)}
@@ -119,6 +136,12 @@ def print_error(exc: Exception, *, json_mode: bool) -> None:
 
 class CliArgumentParser(argparse.ArgumentParser):
     json_errors = False
+
+    # argparse binds self.formatter_class from its __init__ parameter, so a
+    # class attribute would be shadowed everywhere it matters.
+    def __init__(self, *args, **kwargs) -> None:  # argparse itself is dynamically typed
+        kwargs.setdefault("formatter_class", _HELP_FORMATTER)
+        super().__init__(*args, **kwargs)
 
     def error(self, message: str) -> Never:
         if self.json_errors:
@@ -423,11 +446,18 @@ def connected_client(options: CliOptions, deps: AppDependencies) -> object:
     if deps.client_factory is not None:
         # Injected factories are trusted: no probe, no prompt, by design.
         return deps.client_factory(options.ptb)
+    if may_offer_open(options):
+
+        def confirm() -> bool:
+            return confirm_open(no_color=options.no_color)
+    else:
+        confirm = None
     return ensure_client(
         ptb=options.ptb,
         client_maker=default_client,
-        confirm=confirm_open if may_offer_open(options) else None,
+        confirm=confirm,
         opener=deps.opener,
+        no_color=options.no_color,
     )
 
 
@@ -483,9 +513,7 @@ def run_export(
             )
 
     stderr_rich = (
-        make_console(no_color=options.no_color, stderr=True)
-        if RICH_AVAILABLE and options.shell != "json" and sys.stderr.isatty()
-        else None
+        chrome_console(no_color=options.no_color, stderr=True) if options.shell != "json" else None
     )
 
     def collect() -> ExportResult:
@@ -515,7 +543,14 @@ def run_export(
     if options.output and options.output != STDOUT_TARGET:
         target = Path(options.output)
         write_document(document, target, force=options.force)
-        print(f"wrote {target} ({len(result.hosts)} connection(s))", file=sys.stderr)
+        if stderr_rich is not None:
+            render_note(
+                f"✓ wrote {target} ({len(result.hosts)} connection(s))",
+                style="bold green",
+                no_color=options.no_color,
+            )
+        else:
+            print(f"wrote {target} ({len(result.hosts)} connection(s))", file=sys.stderr)
     else:
         sys.stdout.write(document)
     return 0
@@ -579,17 +614,17 @@ def main(argv: Sequence[str] | None = None, deps: AppDependencies | None = None)
     try:
         return run(options, deps or AppDependencies())
     except ExportError as exc:
-        print_error(exc, json_mode=options.shell == "json")
+        print_error(exc, json_mode=options.shell == "json", no_color=options.no_color)
         return exc.exit_code
     except OSError as exc:
-        print_error(exc, json_mode=options.shell == "json")
+        print_error(exc, json_mode=options.shell == "json", no_color=options.no_color)
         return LocalProcessError.exit_code
     except KeyboardInterrupt:
         # Ctrl-C at the interactive host menu is a normal user abort, not a defect.
         print("aborted", file=sys.stderr)
         return 130
     except Exception as exc:  # pragma: no cover - a final safety net for integration defects
-        print_error(exc, json_mode=options.shell == "json")
+        print_error(exc, json_mode=options.shell == "json", no_color=options.no_color)
         if options.debug:
             traceback.print_exc(file=sys.stderr)
         return InternalError.exit_code

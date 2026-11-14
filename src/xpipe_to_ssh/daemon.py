@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import sys
 import time
 from collections.abc import Callable, Iterator
 from enum import Enum
 
 from .errors import XPipeConnectionError
+from .presentation import render_note
 from .xpipe import XPipeAdapter
 
 #: Short deadline for the liveness probe; localhost should answer in milliseconds.
@@ -103,16 +103,6 @@ def probe(client: object) -> None:
     XPipeAdapter(client, timeout=PROBE_TIMEOUT)._call(method)
 
 
-def confirm_open() -> bool:
-    """Ask on stderr whether to launch XPipe; anything but an affirmative answer declines."""
-    sys.stderr.write("XPipe is not running. Open it now with `xpipe open`? [Y/n] ")
-    sys.stderr.flush()
-    line = sys.stdin.readline()
-    if not line:  # input ended; act rather than guess
-        return False
-    return line.strip().lower() in ("", "y", "yes")
-
-
 def open_xpipe() -> subprocess.Popen[bytes]:
     binary = shutil.which("xpipe")
     if binary is None:
@@ -135,15 +125,16 @@ def wait_for_daemon(
     *,
     timeout: float = STARTUP_TIMEOUT,
     proc: subprocess.Popen[bytes] | None = None,
+    no_color: bool = False,
 ) -> object:
     """Poll until the freshly opened XPipe answers, then return a verified client."""
-    print("Waiting for XPipe to start…", file=sys.stderr)
+    render_note("Waiting for XPipe to start…", style="cyan", no_color=no_color)
     deadline = time.monotonic() + timeout
     while True:
         try:
             client = client_maker(ptb)
             probe(client)
-            print("XPipe is ready.", file=sys.stderr)
+            render_note("✓ XPipe is ready.", style="bold green", no_color=no_color)
             return client
         except Exception as exc:
             if proc is not None and (rc := proc.poll()) is not None and rc != 0:
@@ -177,6 +168,7 @@ def ensure_client(
     confirm: ConfirmPrompt | None = None,
     opener: Launcher | None = None,
     timeout: float = STARTUP_TIMEOUT,
+    no_color: bool = False,
 ) -> object:
     """Return a verified XPipe client, offering to launch XPipe when it is down.
 
@@ -192,5 +184,5 @@ def ensure_client(
         status, detail = classify(exc)
         if status is Availability.NOT_RUNNING and confirm is not None and confirm():
             proc = (opener or open_xpipe)()
-            return wait_for_daemon(ptb, client_maker, timeout=timeout, proc=proc)
+            return wait_for_daemon(ptb, client_maker, timeout=timeout, proc=proc, no_color=no_color)
         raise _failure(status, detail) from exc

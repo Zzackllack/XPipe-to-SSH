@@ -13,10 +13,10 @@ from xpipe_to_ssh.cli import AppDependencies, main
 from xpipe_to_ssh.daemon import (
     Availability,
     classify,
-    confirm_open,
     ensure_client,
 )
 from xpipe_to_ssh.errors import XPipeConnectionError
+from xpipe_to_ssh.presentation import confirm_open
 
 
 @contextlib.contextmanager
@@ -140,6 +140,13 @@ class ClassifyTests(unittest.TestCase):
         self.assertIn("boom", detail)
 
 
+class TtyStderr(io.StringIO):
+    """A StringIO that Rich treats as a terminal."""
+
+    def isatty(self) -> bool:
+        return True
+
+
 class ConfirmOpenTests(unittest.TestCase):
     def test_empty_answer_accepts(self) -> None:
         with fake_tty_stdin("\n"), contextlib.redirect_stderr(io.StringIO()):
@@ -162,6 +169,20 @@ class ConfirmOpenTests(unittest.TestCase):
         # EOF must not be mistaken for a default yes.
         with fake_tty_stdin(""), contextlib.redirect_stderr(io.StringIO()):
             self.assertFalse(confirm_open())
+
+    def test_prompt_is_styled_on_a_tty(self) -> None:
+        err = TtyStderr()
+        with fake_tty_stdin("y\n"), mock.patch("sys.stderr", err):
+            self.assertTrue(confirm_open())
+        rendered = err.getvalue()
+        self.assertIn("xpipe open", rendered)
+        self.assertIn("\x1b[", rendered)  # ANSI styling, not the plain text line
+
+    def test_prompt_stays_plain_on_a_pipe(self) -> None:
+        err = io.StringIO()
+        with fake_tty_stdin("y\n"), contextlib.redirect_stderr(err):
+            self.assertTrue(confirm_open())
+        self.assertNotIn("\x1b[", err.getvalue())
 
 
 class EnsureClientTests(unittest.TestCase):

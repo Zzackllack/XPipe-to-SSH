@@ -14,7 +14,7 @@ import yaml
 
 from tests.test_daemon import fake_tty_stdin
 from xpipe_to_ssh.cli import AppDependencies, main
-from xpipe_to_ssh.errors import ExportOutputError, InternalError
+from xpipe_to_ssh.errors import ExportOutputError, InternalError, XPipeError
 from xpipe_to_ssh.export import (
     AgentResolver,
     CommandFields,
@@ -791,6 +791,37 @@ class ExportTuiTests(unittest.TestCase):
 
         self.assertIn("warning: ", err)
         self.assertEqual(_result, 0)
+
+    def test_pretty_export_failure_renders_a_red_error_panel(self) -> None:
+        out, err = io.StringIO(), TtyStderr()
+
+        def unavailable(_ptb: bool) -> object:
+            raise XPipeError("client setup failed")
+
+        with contextlib.redirect_stdout(out), mock.patch("sys.stderr", err):
+            result = main(
+                ["missing", "--shell", "auto"],
+                AppDependencies(client_factory=unavailable),
+            )
+
+        self.assertEqual(result, 1)
+        rendered = err.getvalue()
+        self.assertIn("error: ", rendered)
+        self.assertIn("client setup failed", rendered)
+        self.assertNotIn("warning: ", rendered)
+
+    def test_pretty_wrote_line_keeps_the_documented_substring(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "xpipe.conf"
+            out, err = io.StringIO(), TtyStderr()
+            with contextlib.redirect_stdout(out), mock.patch("sys.stderr", err):
+                result = main(
+                    ["--export", "ssh-config", "--output", str(target)],
+                    AppDependencies(client_factory=lambda _: sample_client()),
+                )
+
+            self.assertEqual(result, 0)
+            self.assertIn("wrote", err.getvalue())
 
 
 class PickHostsExportTests(unittest.TestCase):

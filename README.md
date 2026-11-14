@@ -236,7 +236,10 @@ Use `--strict` to reject such a command in automation.
 
 - Normal command output is written to stdout; warnings and text-mode errors go
   to stderr. The `--pick-host` menu is terminal chrome and also goes to stderr,
-  so `--shell json` output stays parseable while selecting an address.
+  so `--shell json` output stays parseable while selecting an address. On an
+  interactive terminal, errors render as a red panel and status notes as
+  one-liners instead of plain text; piped output, `--plain`, and `--shell json`
+  never see panels, and the exact bytes they produce are unchanged.
 - JSON command output has `schemaVersion: 1`, `connection`, `env`, `argv`, and
   `warnings`, plus `provenance` when `--explain` is given. JSON listing has
   `schemaVersion: 1` and `connections` with names, UUIDs, types, hosts,

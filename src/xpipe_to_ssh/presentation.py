@@ -49,6 +49,68 @@ def make_console(*, no_color: bool = False, stderr: bool = False) -> Console | N
     return Console(no_color=no_color, stderr=stderr, highlight=False)
 
 
+def chrome_console(*, no_color: bool = False, stderr: bool = True) -> Console | None:
+    """Colored console for UI chrome, or None when output should stay plain.
+
+    This is the one place the "interactive terminal means Rich, piped means
+    plain text" rule lives. Callers still own format-specific gates
+    (``--shell json``, ``--plain``); this helper only answers "can we draw on
+    this stream?".
+    """
+    if not RICH_AVAILABLE:
+        return None
+    stream = sys.stderr if stderr else sys.stdout
+    if not stream.isatty():
+        return None
+    return Console(no_color=no_color, stderr=stderr, highlight=False)
+
+
+def render_note(message: str, *, style: str = "dim", no_color: bool = False) -> None:
+    """One-line status note on stderr; plain text when piped or without Rich."""
+    console = chrome_console(no_color=no_color, stderr=True)
+    if console is None:
+        print(message, file=sys.stderr)
+        return
+    console.print(Text(message, style=style))
+
+
+def render_error(message: str, *, no_color: bool = False) -> bool:
+    """Failure panel on stderr; returns False when plain output is required.
+
+    The ``error: `` prefix is kept inside the panel so consumers that grep
+    stderr for it keep working in both modes.
+    """
+    console = chrome_console(no_color=no_color, stderr=True)
+    if console is None:
+        return False
+    text = Text()
+    text.append("error: ", style="bold red")
+    text.append(message)
+    console.print(Panel(Group(text), border_style="red", padding=(0, 1)))
+    return True
+
+
+def confirm_open(*, no_color: bool = False) -> bool:
+    """Ask on stderr whether to launch XPipe; anything but an affirmative answer declines."""
+    question = "XPipe is not running. Open it now with `xpipe open`? [Y/n] "
+    console = chrome_console(no_color=no_color, stderr=True)
+    if console is not None:
+        line = Text()
+        line.append("? ", style="bold yellow")
+        line.append("XPipe is not running. ", style="bold")
+        line.append("Open it now with ")
+        line.append("xpipe open", style="cyan")
+        line.append("? [Y/n] ")
+        console.print(line, end="")
+    else:
+        sys.stderr.write(question)
+        sys.stderr.flush()
+    line = sys.stdin.readline()
+    if not line:  # input ended; act rather than guess
+        return False
+    return line.strip().lower() in ("", "y", "yes")
+
+
 def literal(value: object, *, style: str | None = None) -> Text:
     return Text(str(value), style=style or "", no_wrap=False)
 
