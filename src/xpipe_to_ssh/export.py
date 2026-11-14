@@ -16,6 +16,7 @@ import os
 import re
 import shlex
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -23,10 +24,18 @@ from typing import Any, Literal
 import yaml
 
 from . import __version__
+from .agents import attach_agent
 from .errors import ExportError, ExportOutputError, InternalError
-from .models import SSHCommand
+from .models import AgentSocket, SSHCommand
 from .ssh import build_ssh_argv
-from .xpipe import WireRecord, connection_type, display_path, store_id
+from .xpipe import (
+    WireRecord,
+    connection_config,
+    connection_type,
+    display_path,
+    selectable_texts,
+    store_id,
+)
 
 ExportFormat = Literal["ssh-config", "yaml", "json", "ansible"]
 #: Shared with the argument parser so the two cannot drift.
@@ -44,6 +53,10 @@ _SAFE_INVENTORY_NAME = re.compile(r"[^A-Za-z0-9._@-]+")
 #: An ssh option is written ``Key=Value`` or ``Key Value``; both appear in
 #: XPipe's additionalOptions.
 _OPTION_SEPARATOR = re.compile(r"[=\s]+")
+#: Characters that end an ssh_config token: whitespace, and the quote and
+#: escape machinery itself. A value carrying any of them gets double-quoted
+#: with backslash escapes, as ssh_config(5) requires.
+_SSH_CONFIG_QUOTE = re.compile(r'[\s"\\=]')
 #: argv flags that consume the next token.
 _VALUE_FLAGS = frozenset({"-p", "-l", "-i", "-o"})
 #: additionalOptions that change where an ssh config block ends rather than
@@ -77,6 +90,14 @@ class ExportHost:
     available_hosts: list[str]
     auth_methods: list[str]
     gateways: list[str]
+    #: Password-manager agent socket the command must run with, if any.
+    identity_agent: str | None = None
+
+
+#: Asks the user which of the available addresses to export; gets the XPipe
+#: selected host (or None) and the full list, returns the chosen address.
+HostPicker = Callable[[str | None, list[str]], str | None]
+AgentResolver = Callable[..., AgentSocket | None]
 
 
 @dataclass
@@ -92,6 +113,14 @@ def sanitize_alias(name: str, *, allow_slash: bool = True) -> str:
     pattern = _SAFE_NAME if allow_slash else _SAFE_INVENTORY_NAME
     cleaned = pattern.sub("-", name).strip("-./")
     return cleaned or "xpipe"
+
+
+def ssh_config_value(value: str) -> str:
+    """Quote one ssh_config argument, if it cannot stand alone as a token."""
+    if not _SSH_CONFIG_QUOTE.search(value):
+        return value
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def unique_names(names: list[str]) -> list[str]:
@@ -187,15 +216,35 @@ def build_export_host(command: SSHCommand, warnings: list[str]) -> ExportHost:
         available_hosts=list(command.available_hosts),
         auth_methods=list(command.auth_methods),
         gateways=list(command.gateway_names),
+        # The env var is what --connect would hand to ssh, so it is the
+        # authoritative statement of which agent this connection must use.
+        identity_agent=command.env.get("SSH_AUTH_SOCK"),
     )
 
 
-def collect_export(client: object, infos: list[WireRecord]) -> ExportResult:
+def collect_export(
+    client: object,
+    infos: list[WireRecord],
+    *,
+    agent_resolver: AgentResolver | None = None,
+    agent_socket: str = "auto",
+    host_picker: HostPicker | None = None,
+) -> ExportResult:
     """Reduce every exportable store to an ``ExportHost``.
 
     One unreadable connection must not sink a whole export, so a failure is
     recorded as a warning and the connection is skipped; ``--strict`` turns
     those warnings back into a hard failure for automation.
+
+    ``agent_resolver`` is what binds password-manager-agent connections to a
+    concrete socket. Without it no ``IdentityAgent`` is emitted, which would
+    produce an unauthenticatable export, so callers that build real documents
+    should always pass one; an explicitly configured socket that cannot be
+    opened aborts the whole export instead of being skipped silently.
+
+    ``host_picker`` is called for every connection with more than one
+    available address, before anything is built; an ``ExportError`` it raises
+    aborts the export, so a half-asked run never ships a document.
     """
     result = ExportResult()
     for info in sorted(infos, key=lambda item: display_path(item).casefold()):
@@ -207,11 +256,20 @@ def collect_export(client: object, infos: list[WireRecord]) -> ExportResult:
                 f"Skipped {name!r}: an ssh config host already resolves through ~/.ssh/config."
             )
             continue
+        # Resolve the address override before the try: a picker failure (no
+        # TTY, bad answer, EOF) must abort the export, not drop one connection.
+        host_override = None
+        if host_picker is not None:
+            selected, available = selectable_texts(connection_config(info).get("host"))
+            if len(available) > 1:
+                host_override = host_picker(selected, available)
         try:
-            command = build_ssh_argv(client, info)
+            command = build_ssh_argv(client, info, host_override=host_override)
         except ExportError as exc:
             result.warnings.append(f"Skipped {name!r}: {exc}")
             continue
+        if agent_resolver is not None:
+            attach_agent(command, agent_socket, agent_resolver)
         result.warnings.extend(f"{name}: {warning}" for warning in command.warnings)
         result.hosts.append(build_export_host(command, result.warnings))
 
@@ -222,6 +280,28 @@ def collect_export(client: object, infos: list[WireRecord]) -> ExportResult:
     return result
 
 
+def _proxy_destination(proxy_command: str | None) -> str | None:
+    """Return the host an exported ProxyCommand dials, if it is well-formed.
+
+    Only the shape the exporter itself generates is understood
+    (``... -W %h:%p HOST``); anything else is left alone rather than
+    guessed at. The destination is what a Gateway block must also match,
+    because the inner ssh re-reads the config instead of inheriting the
+    outer connection's settings.
+    """
+    if not proxy_command:
+        return None
+    try:
+        tokens = shlex.split(proxy_command)
+    except ValueError:
+        return None
+    if len(tokens) >= 3 and tokens[-3] == "-W" and tokens[-2] == "%h:%p":
+        destination = tokens[-1]
+        if destination and "%" not in destination and all(map(str.isprintable, destination)):
+            return destination
+    return None
+
+
 def _ssh_config_directives(host: ExportHost) -> list[tuple[str, str]]:
     fields = host.fields
     directives: list[tuple[str, str]] = [("HostName", fields.hostname)]
@@ -229,7 +309,11 @@ def _ssh_config_directives(host: ExportHost) -> list[tuple[str, str]]:
         directives.append(("User", fields.username))
     if fields.port is not None:
         directives.append(("Port", str(fields.port)))
-    directives.extend(("IdentityFile", path) for path in fields.identity_files)
+    directives.extend(("IdentityFile", ssh_config_value(path)) for path in fields.identity_files)
+    if host.identity_agent:
+        # OpenSSH's per-host answer to SSH_AUTH_SOCK; without it an exported
+        # password-manager-agent connection cannot authenticate at all.
+        directives.append(("IdentityAgent", ssh_config_value(host.identity_agent)))
     if fields.forward_x11:
         directives.append(("ForwardX11", "yes"))
     if fields.proxy_command:
@@ -244,10 +328,25 @@ def render_ssh_config(hosts: list[ExportHost]) -> str:
         "# Include this file from ~/.ssh/config, for example:",
         "#   Include ~/.ssh/config.d/xpipe.conf",
     ]
+    # A ProxyCommand's inner ssh dials the gateway by hostname and re-reads
+    # the config, so the gateway block must match that hostname too. The
+    # extension gives the inner hop the gateway's Port, User, IdentityFile,
+    # and IdentityAgent; without it, exported gateway connections fall back
+    # to ambient settings and fail key authentication.
+    by_hostname = {host.fields.hostname: host for host in hosts}
+    extra_patterns: dict[int, list[str]] = {}
     for host in hosts:
+        destination = _proxy_destination(host.fields.proxy_command)
+        if destination is None:
+            continue
+        target = by_hostname.get(destination)
+        if target is not None and destination != target.alias:
+            extra_patterns.setdefault(id(target), []).append(destination)
+    for host in hosts:
+        patterns = [host.alias, *extra_patterns.get(id(host), [])]
         lines.append("")
         lines.append(f"# XPipe connection: {host.name}")
-        lines.append(f"Host {host.alias}")
+        lines.append(f"Host {' '.join(patterns)}")
         lines.extend(f"    {key} {value}" for key, value in _ssh_config_directives(host))
     return "\n".join(lines) + "\n"
 
@@ -267,6 +366,8 @@ def _host_record(host: ExportHost) -> dict[str, Any]:
         record["port"] = fields.port
     if fields.identity_files:
         record["identityFiles"] = list(fields.identity_files)
+    if host.identity_agent:
+        record["identityAgent"] = host.identity_agent
     if fields.forward_x11:
         record["forwardX11"] = True
     if fields.proxy_command:
@@ -307,6 +408,10 @@ def _ansible_variables(host: ExportHost) -> dict[str, Any]:
     if fields.identity_files:
         variables["ansible_ssh_private_key_file"] = fields.identity_files[0]
     common_args: list[str] = []
+    if host.identity_agent:
+        # -o values run to the end of the argument, so a spaced socket path
+        # survives as a single one; shlex.join quotes the token for Ansible.
+        common_args += ["-o", f"IdentityAgent={host.identity_agent}"]
     if fields.proxy_command:
         common_args += ["-o", f"ProxyCommand={fields.proxy_command}"]
     for key, value in fields.options:

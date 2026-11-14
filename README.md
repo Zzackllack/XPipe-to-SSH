@@ -145,22 +145,47 @@ xpipe-to-ssh --export ssh-config --output ~/.ssh/config.d/xpipe.conf
 xpipe-to-ssh --export yaml --output hosts.yaml
 xpipe-to-ssh --export ansible --output inventory.yml
 xpipe-to-ssh --export json --filter '**prod**'
+xpipe-to-ssh --export ssh-config --pick-hosts    # ask which address to use, per connection
 ```
 
 Formats:
 
 - `ssh-config` - an OpenSSH client config. Each connection becomes a
   `Host <alias>` block with `HostName`, `User`, `Port`, `IdentityFile`,
-  `ForwardX11`, a `ProxyCommand` for a gateway hop, and any
-  `additionalOptions`. The alias is the full XPipe path with whitespace and
-  glob characters folded to `-`, for example `Host default/oracle-oc1`.
-  Include the generated file from `~/.ssh/config`.
+  `ForwardX11`, a `ProxyCommand` for a gateway hop, `IdentityAgent` for a
+  password-manager-agent connection, and any `additionalOptions`. The alias
+  is the full XPipe path with whitespace and glob characters folded to `-`,
+  for example `Host default/oracle-oc1`. A connection whose ProxyCommand
+  delegates to an exported gateway expands the gateway's `Host` line with
+  the destination the command dials (for example `Host default/gateway
+  gw.example`), so the inner ssh hop re-reading the config picks up the
+  gateway's Port, User, IdentityFile, and IdentityAgent. Include the
+  generated file from `~/.ssh/config`.
 - `yaml` - the same fields as an ordered `hosts:` list, for tooling that reads
   a `hosts.yaml`/`hosts.yml`.
 - `ansible` - an Ansible inventory (`all.hosts`) with `ansible_host`,
   `ansible_user`, `ansible_port`, `ansible_ssh_private_key_file`, and
   `ansible_ssh_common_args` for gateways and extra options.
 - `json` - structured output with `schemaVersion` and `generator`.
+
+Connections whose identity is a password-manager SSH agent cannot
+authenticate without knowing the agent socket, so the export binds them the
+same way the single-command path does: a machine-specific `IdentityAgent`
+in `ssh-config`, an `IdentityAgent=...` in `ansible_ssh_common_args`, or an
+`identityAgent` field in `yaml`/`json` records. If no matching socket is
+found, the connection is exported with a warning instead of failing
+silently; `--strict` turns that into a failure. `--agent-socket PATH` forces
+one socket for the whole export instead of auto-discovering per connection,
+and `--agent-socket none` disables agent binding entirely.
+
+Connections that store several available addresses export the one XPipe has
+selected. To choose per connection while exporting, pass `--pick-hosts`
+(interactive terminals only): every connection with more than one available
+address is offered the same numbered menu as `--pick-host`, and the chosen
+address is written into the document. Your answer is kept per connection, so
+a connection with a single address is never asked about. `--pick-hosts`
+requires `--export` and an interactive terminal; with `--shell json` the
+menus stay on stderr so stdout remains machine readable.
 
 `--output PATH` writes the document to a file instead of stdout; `-` means
 stdout. An existing file is never overwritten unless `--force` is given, and a

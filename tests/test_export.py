@@ -8,14 +8,19 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
+from tests.test_daemon import fake_tty_stdin
 from xpipe_to_ssh.cli import AppDependencies, main
 from xpipe_to_ssh.errors import ExportOutputError, InternalError
 from xpipe_to_ssh.export import (
+    AgentResolver,
+    CommandFields,
     ExportHost,
     ExportResult,
+    HostPicker,
     ansible_document,
     collect_export,
     command_fields,
@@ -25,7 +30,7 @@ from xpipe_to_ssh.export import (
     unique_names,
     write_document,
 )
-from xpipe_to_ssh.models import SSHCommand
+from xpipe_to_ssh.models import AgentSocket, SSHCommand
 
 
 def ssh_info(store: str, *name: str, **raw: object) -> dict[str, object]:
@@ -216,6 +221,41 @@ class SerializerTests(unittest.TestCase):
         self.assertIn("    Port 2222", text)
         self.assertIn("    User bob", text)
         self.assertIn("    IdentityFile /home/bob/.ssh/id_ed25519", text)
+
+    def test_gateway_block_matches_the_proxycommand_destination(self) -> None:
+        # The inner ssh spawned by the ProxyCommand dials the gateway by its
+        # hostname and re-reads the config; the gateway block must match for
+        # Port, User, IdentityFile, and IdentityAgent to apply to that hop.
+        text = render_export(ExportResult(hosts=exported_hosts(sample_client())), "ssh-config")
+
+        self.assertIn("Host default/gateway gw.example\n", text)
+
+    def test_proxy_command_destination_without_a_gateway_block_extends_nothing(self) -> None:
+        hosts = [
+            ExportHost(
+                name="default/routed",
+                alias="default/routed",
+                id="routed",
+                type="ssh",
+                fields=CommandFields(
+                    hostname="routed.example",
+                    username="alice",
+                    port=2222,
+                    identity_files=[],
+                    forward_x11=False,
+                    proxy_command="ssh -l alice -W %h:%p gw.example",
+                    options=[],
+                ),
+                available_hosts=["routed.example"],
+                auth_methods=[],
+                gateways=["Gateway"],
+            )
+        ]
+
+        text = render_export(ExportResult(hosts=hosts), "ssh-config")
+
+        self.assertIn("Host default/routed\n", text)
+        self.assertNotIn("Host default/routed gw.example", text)
 
     def test_ssh_config_includes_gateway_forwarding_and_extra_options(self) -> None:
         text = render_export(ExportResult(hosts=exported_hosts(sample_client())), "ssh-config")
@@ -494,6 +534,262 @@ class ExportArgumentTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(len(json.loads(out)["hosts"]), 4)
+
+
+def agent_info(
+    store: str, *name: str, identifier: str = "bitwarden", host: str = ""
+) -> dict[str, object]:
+    """A store record whose identity is a password-manager SSH agent."""
+    return ssh_info(
+        store,
+        *name,
+        host=host or f"{store}.example",
+        identity={
+            "type": "inPlace",
+            "identityStore": {
+                "type": "localIdentity",
+                "username": "alice",
+                "sshIdentity": {"type": "passwordManagerAgent", "identifier": identifier},
+            },
+        },
+    )
+
+
+class AgentExportTests(unittest.TestCase):
+    def agent_client(self) -> MultiClient:
+        return MultiClient([agent_info("a", "default", "alpha")])
+
+    def agent_socket(self, count: int = 2, path: str = "/tmp/agent.sock") -> AgentSocket:
+        return AgentSocket(path, "Bitwarden", count, provider="bitwarden")
+
+    def collect(
+        self,
+        client: MultiClient,
+        *,
+        agent_resolver: AgentResolver | None = None,
+        agent_socket: str = "auto",
+        host_picker: HostPicker | None = None,
+    ) -> ExportResult:
+        return collect_export(
+            client,
+            list(client.records.values()),
+            agent_resolver=agent_resolver,
+            agent_socket=agent_socket,
+            host_picker=host_picker,
+        )
+
+    def test_ssh_config_emits_identity_agent(self) -> None:
+        result = self.collect(
+            self.agent_client(), agent_resolver=lambda *_a, **_k: self.agent_socket()
+        )
+
+        text = render_export(ExportResult(hosts=result.hosts), "ssh-config")
+
+        self.assertIn("    IdentityAgent /tmp/agent.sock", text)
+
+    def test_yaml_and_json_records_carry_identity_agent(self) -> None:
+        hosts = self.collect(
+            self.agent_client(), agent_resolver=lambda *_a, **_k: self.agent_socket()
+        ).hosts
+        for fmt, load in (("yaml", yaml.safe_load), ("json", json.loads)):
+            with self.subTest(fmt=fmt):
+                document = load(render_export(ExportResult(hosts=hosts), fmt))
+                host = next(h for h in document["hosts"] if h["alias"] == "default/alpha")
+                self.assertEqual(host["identityAgent"], "/tmp/agent.sock")
+
+    def test_ansible_common_args_include_identity_agent(self) -> None:
+        hosts = self.collect(
+            self.agent_client(), agent_resolver=lambda *_a, **_k: self.agent_socket()
+        ).hosts
+
+        document = ansible_document(hosts)
+        args = document["all"]["hosts"]["default-alpha"]["ansible_ssh_common_args"]
+
+        self.assertIn("IdentityAgent=/tmp/agent.sock", args)
+
+    def test_missing_socket_is_a_warning_and_omits_identity_agent(self) -> None:
+        result = self.collect(self.agent_client(), agent_resolver=lambda *_a, **_k: None)
+
+        self.assertTrue(
+            any("no matching usable agent socket" in warning for warning in result.warnings)
+        )
+        text = render_export(ExportResult(hosts=result.hosts), "ssh-config")
+        self.assertNotIn("IdentityAgent", text)
+
+    def test_zero_identity_socket_is_a_warning(self) -> None:
+        result = self.collect(
+            self.agent_client(), agent_resolver=lambda *_a, **_k: self.agent_socket(count=0)
+        )
+
+        self.assertTrue(any("no identities" in warning for warning in result.warnings))
+
+    def test_without_resolver_no_identity_agent_is_emitted(self) -> None:
+        result = self.collect(self.agent_client())
+
+        self.assertEqual(result.hosts[0].identity_agent, None)
+
+    def test_explicit_agent_socket_flag_reaches_the_resolver(self) -> None:
+        client = self.agent_client()
+        requested: list[str] = []
+
+        def resolver(agent_socket: str, **_kwargs: object) -> AgentSocket:
+            requested.append(agent_socket)
+            return self.agent_socket(path=agent_socket)
+
+        # run_export injects no agent_resolver, so exercise the CLI explicitly.
+        out_buffer, err_buffer = io.StringIO(), io.StringIO()
+        with (
+            contextlib.redirect_stdout(out_buffer),
+            contextlib.redirect_stderr(err_buffer),
+        ):
+            result = main(
+                ["--export", "ssh-config", "--agent-socket", "/opt/custom.sock"],
+                AppDependencies(client_factory=lambda _: client, agent_resolver=resolver),
+            )
+        self.assertEqual(result, 0)
+        self.assertEqual(requested, ["/opt/custom.sock"])
+        self.assertIn("    IdentityAgent /opt/custom.sock", out_buffer.getvalue())
+
+    def test_strict_turns_a_missing_socket_into_a_failure(self) -> None:
+        client = self.agent_client()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            result = main(
+                ["--export", "ssh-config", "--strict", "--shell", "json"],
+                AppDependencies(
+                    client_factory=lambda _: client, agent_resolver=lambda *_a, **_k: None
+                ),
+            )
+
+        self.assertEqual(result, 2)
+        self.assertEqual(json.loads(out.getvalue())["error"]["code"], "strict_warnings")
+
+    def test_spaced_socket_path_is_quoted_in_ssh_config(self) -> None:
+        result = self.collect(
+            self.agent_client(),
+            agent_resolver=lambda *_a, **_k: self.agent_socket(path="/tmp/my agents/agent.sock"),
+        )
+
+        text = render_export(ExportResult(hosts=result.hosts), "ssh-config")
+
+        self.assertIn('    IdentityAgent "/tmp/my agents/agent.sock"', text)
+
+
+class PickHostsExportTests(unittest.TestCase):
+    def multi_host_client(self) -> MultiClient:
+        return MultiClient(
+            [
+                ssh_info(
+                    "a",
+                    "default",
+                    "alpha",
+                    host={"value": "10.0.0.1", "available": ["10.0.0.1", "10.0.0.2", "192.0.2.7"]},
+                ),
+                ssh_info("b", "default", "beta", host="beta.example"),
+            ]
+        )
+
+    def test_selected_host_is_used_without_the_flag(self) -> None:
+        text = render_export(
+            ExportResult(hosts=exported_hosts(self.multi_host_client())), "ssh-config"
+        )
+
+        self.assertIn("HostName 10.0.0.1", text)
+
+    def test_pick_hosts_exports_the_chosen_host(self) -> None:
+        client = self.multi_host_client()
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch("xpipe_to_ssh.presentation.RICH_AVAILABLE", False),
+            fake_tty_stdin("2\n"),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            result = main(
+                ["--export", "ssh-config", "--pick-hosts"],
+                AppDependencies(client_factory=lambda _: client),
+            )
+
+        self.assertEqual(result, 0)
+        self.assertIn("HostName 10.0.0.2", out.getvalue())
+        # A connection with a single available host is never prompted, so the
+        # one queued answer was spent on alpha alone.
+        self.assertIn("HostName beta.example", out.getvalue())
+
+    def test_pick_hosts_lists_all_alternatives_before_asking(self) -> None:
+        client = self.multi_host_client()
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch("xpipe_to_ssh.presentation.RICH_AVAILABLE", False),
+            fake_tty_stdin("1\n"),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            main(
+                ["--export", "ssh-config", "--pick-hosts"],
+                AppDependencies(client_factory=lambda _: client),
+            )
+
+        self.assertIn("192.0.2.7", err.getvalue())
+
+    def test_pick_hosts_keeps_json_output_parseable(self) -> None:
+        client = self.multi_host_client()
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch("xpipe_to_ssh.presentation.RICH_AVAILABLE", False),
+            fake_tty_stdin("2\n"),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            result = main(
+                ["--export", "json", "--pick-hosts"],
+                AppDependencies(client_factory=lambda _: client),
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            next(h for h in json.loads(out.getvalue())["hosts"] if h["alias"] == "default/alpha")[
+                "hostname"
+            ],
+            "10.0.0.2",
+        )
+
+    def test_pick_hosts_with_an_out_of_range_answer_fails_without_a_document(self) -> None:
+        client = self.multi_host_client()
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch("xpipe_to_ssh.presentation.RICH_AVAILABLE", False),
+            fake_tty_stdin("9\n"),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            result = main(
+                ["--export", "ssh-config", "--pick-hosts"],
+                AppDependencies(client_factory=lambda _: client),
+            )
+
+        self.assertEqual(result, 2)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_pick_hosts_without_a_tty_fails_instead_of_skipping(self) -> None:
+        client = self.multi_host_client()
+        with mock.patch("sys.stdin", io.StringIO("")):
+            result, out, err = run_export(["--export", "ssh-config", "--pick-hosts"], client)
+
+        self.assertEqual(result, 2)
+        self.assertIn("--pick-hosts requires an interactive terminal", err)
+        self.assertEqual(out, "")
+
+    def test_pick_hosts_requires_export(self) -> None:
+        client = self.multi_host_client()
+        for argv in (["--pick-hosts"], ["--pick-hosts", "--list"], ["--pick-hosts", "alpha"]):
+            with self.subTest(argv=argv):
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    self.assertEqual(
+                        main(argv, AppDependencies(client_factory=lambda _: client)), 2
+                    )
+                self.assertIn("--pick-hosts requires --export", stderr.getvalue())
 
 
 if __name__ == "__main__":

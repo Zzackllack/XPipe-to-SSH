@@ -280,12 +280,16 @@ def address_by_number(available: list[str], answer: str) -> str:
 
 
 def choose_host_interactively(
-    current: str | None, available: list[str], *, no_color: bool
+    current: str | None,
+    available: list[str],
+    *,
+    no_color: bool,
+    flag_name: str = "--pick-host",
 ) -> str | None:
     if len(available) <= 1:
         return current
     if not sys.stdin.isatty():
-        raise ExportError("--pick-host requires an interactive terminal")
+        raise ExportError(f"{flag_name} requires an interactive terminal")
     # The menu is terminal chrome: keep stdout reserved for the rendered command.
     if RICH_AVAILABLE:
         console = make_console(no_color=no_color, stderr=True)

@@ -15,7 +15,7 @@ from subprocess import Popen
 from typing import Never, cast
 
 from . import __version__
-from .agents import resolve_agent_socket
+from .agents import attach_agent, resolve_agent_socket
 from .clipboard import copy_to_clipboard
 from .config import load_settings
 from .daemon import confirm_open, ensure_client
@@ -70,6 +70,7 @@ class CliOptions:
     agent_socket: str
     host: str | None
     pick_host: bool
+    pick_hosts: bool
     connect: bool
     remote_command: str | None
     ssh_args: list[str]
@@ -226,6 +227,11 @@ def build_parser() -> CliArgumentParser:
     parser.add_argument(
         "--pick-host", action="store_true", help="interactively choose an available target"
     )
+    parser.add_argument(
+        "--pick-hosts",
+        action="store_true",
+        help="with --export, ask which available target to use for each connection",
+    )
     parser.add_argument("--connect", action="store_true", help="run SSH directly")
     parser.add_argument(
         "--remote-command",
@@ -314,11 +320,12 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
             args.pick_host,
             args.plain,
             args.explain,
-            explicit_agent_socket is not None,
             args.ssh_args,
         )
     ):
         parser.error("--export cannot be combined with connection-only options")
+    if args.pick_hosts and not args.export:
+        parser.error("--pick-hosts requires --export")
     if args.host and args.pick_host:
         parser.error("--host and --pick-host are mutually exclusive")
     if args.connect and args.list:
@@ -362,6 +369,7 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
         agent_socket=args.agent_socket,
         host=args.host,
         pick_host=args.pick_host,
+        pick_hosts=args.pick_hosts,
         connect=args.connect,
         remote_command=args.remote_command,
         ssh_args=list(args.ssh_args),
@@ -453,32 +461,31 @@ def prepare_command(client: object, options: CliOptions, deps: AppDependencies) 
             selected_host, available_hosts, no_color=options.no_color
         )
     command = build_ssh_argv(client, info, host_override=host_override, extra_argv=options.ssh_args)
-    if command.needs_password_manager_agent:
-        agent = deps.agent_resolver(
-            options.agent_socket,
-            provider=command.agent_provider,
-            identifier=command.agent_identifier,
-        )
-        if agent:
-            command.agent = agent
-            command.env["SSH_AUTH_SOCK"] = agent.path
-            if agent.identity_count == 0:
-                detail = f" ({agent.probe_error})" if agent.probe_error else ""
-                command.warnings.append(
-                    f"{agent.label} socket was found, but ssh-add reported no identities{detail}."
-                )
-        else:
-            command.warnings.append(
-                "This connection uses a password-manager SSH agent, but no matching usable agent socket was found. Pass --agent-socket PATH."
-            )
+    attach_agent(command, options.agent_socket, deps.agent_resolver)
     command.warnings = dedupe(command.warnings)
     return command
 
 
-def run_export(client: object, options: CliOptions, fmt: ExportFormat) -> int:
+def run_export(
+    client: object, options: CliOptions, fmt: ExportFormat, deps: AppDependencies
+) -> int:
     """Export every matching connection as one document or file."""
     infos = exportable_connections(client, name_pattern=store_filter(options.list_filter or ""))
-    result = collect_export(client, infos)
+    picker = None
+    if options.pick_hosts:
+
+        def picker(current: str | None, available: list[str]) -> str | None:
+            return choose_host_interactively(
+                current, available, no_color=options.no_color, flag_name="--pick-hosts"
+            )
+
+    result = collect_export(
+        client,
+        infos,
+        agent_resolver=deps.agent_resolver,
+        agent_socket=options.agent_socket,
+        host_picker=picker,
+    )
     if options.strict and result.warnings:
         raise StrictWarningsError(result.warnings)
     for warning in result.warnings:
@@ -502,7 +509,7 @@ def run(options: CliOptions, deps: AppDependencies) -> int:
         )
         return 0
     if options.export:
-        return run_export(client, options, options.export)
+        return run_export(client, options, options.export, deps)
     command = prepare_command(client, options, deps)
     if options.strict and command.warnings:
         raise StrictWarningsError(command.warnings)
