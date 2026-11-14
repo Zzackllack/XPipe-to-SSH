@@ -5,17 +5,20 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import traceback
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from subprocess import Popen
 from typing import Never, cast
 
 from . import __version__
 from .agents import resolve_agent_socket
 from .clipboard import copy_to_clipboard
 from .config import load_settings
+from .daemon import confirm_open, ensure_client
 from .errors import (
     EXIT_OK,
     ExecutionError,
@@ -87,6 +90,8 @@ class AppDependencies:
     clipboard: Callable[[str], str] = copy_to_clipboard
     executor: Callable[[list[str], dict[str, str]], None] | None = None
     agent_resolver: Callable[..., AgentSocket | None] = resolve_agent_socket
+    # Launches XPipe (defaults to `xpipe open`); injectable so tests never spawn it.
+    opener: Callable[[], Popen[bytes] | None] | None = None
 
 
 def error_code(exc: Exception) -> str:
@@ -386,6 +391,35 @@ def default_client(ptb: bool) -> object:
         ) from exc
 
 
+def may_offer_open(options: CliOptions) -> bool:
+    """Decide whether prompting to launch XPipe makes sense for this run.
+
+    JSON output must stay machine readable, and a plain ``xpipe open`` starts
+    the release build, so PTB builds and custom beacon ports must not be
+    offered it either; those users start their build manually.
+    """
+    if options.shell == "json":
+        return False
+    if options.ptb or os.environ.get("XPIPE_BEACON_PORT"):
+        return False
+    if not sys.stdin.isatty():
+        return False
+    # Never offer a launch we cannot perform.
+    return shutil.which("xpipe") is not None
+
+
+def connected_client(options: CliOptions, deps: AppDependencies) -> object:
+    if deps.client_factory is not None:
+        # Injected factories are trusted: no probe, no prompt, by design.
+        return deps.client_factory(options.ptb)
+    return ensure_client(
+        ptb=options.ptb,
+        client_maker=default_client,
+        confirm=confirm_open if may_offer_open(options) else None,
+        opener=deps.opener,
+    )
+
+
 def _execvpe(argv: list[str], env: dict[str, str]) -> None:
     """Replace this process with ssh, resolving it from the command's own PATH.
 
@@ -460,7 +494,7 @@ def run_export(client: object, options: CliOptions, fmt: ExportFormat) -> int:
 
 
 def run(options: CliOptions, deps: AppDependencies) -> int:
-    client = (deps.client_factory or default_client)(options.ptb)
+    client = connected_client(options, deps)
     if options.list_mode:
         infos = exportable_connections(client, name_pattern=store_filter(options.list_filter or ""))
         render_list(

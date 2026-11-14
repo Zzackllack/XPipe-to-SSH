@@ -24,6 +24,25 @@ instances require the client to be configured with a token and base URL; this
 CLI intentionally constructs the local client only. `pyyaml` renders the YAML
 and Ansible inventory exports.
 
+## When XPipe is not running
+
+If the CLI cannot reach the XPipe daemon, it offers to start it — on
+interactive terminals only, after the connection check fails and before any
+work begins:
+
+```text
+XPipe is not running. Open it now with `xpipe open`? [Y/n]
+```
+
+Answering yes launches `xpipe open` (which starts the daemon and opens the
+application) and the CLI waits up to 60 seconds for the local HTTP API to
+answer before continuing; answering no prints the usual error. `--shell json`
+and non-interactive terminals never see the prompt. The offer is also skipped
+for `--ptb` and for `XPIPE_BEACON_PORT` overrides, because a plain
+`xpipe open` starts the release build. When XPipe is running but rejects
+authentication — the HTTP API is disabled or XPipe is locked — reopening
+would not help, so the CLI reports that instead of offering a restart.
+
 ## Installation
 
 ```bash
