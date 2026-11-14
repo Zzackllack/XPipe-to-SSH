@@ -27,7 +27,7 @@ from . import __version__
 from .agents import attach_agent
 from .errors import ExportError, ExportOutputError, InternalError
 from .models import AgentSocket, SSHCommand
-from .ssh import build_ssh_argv
+from .ssh import build_ssh_argv, ssh_config_alias
 from .xpipe import (
     WireRecord,
     connection_config,
@@ -92,6 +92,9 @@ class ExportHost:
     gateways: list[str]
     #: Password-manager agent socket the command must run with, if any.
     identity_agent: str | None = None
+    #: Host-line patterns rendered in the ssh-config output. Starts as the
+    #: alias; the exporter may append a proven gateway destination.
+    patterns: list[str] = field(default_factory=list)
 
 
 #: Asks the user which of the available addresses to export; gets the XPipe
@@ -101,11 +104,20 @@ AgentResolver = Callable[..., AgentSocket | None]
 
 
 @dataclass
+class SkippedHost:
+    """A connection that could not be exported, and why."""
+
+    name: str
+    reason: str
+
+
+@dataclass
 class ExportResult:
     """The collected export plus everything worth telling the user about it."""
 
     hosts: list[ExportHost] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    skipped: list[SkippedHost] = field(default_factory=list)
 
 
 def sanitize_alias(name: str, *, allow_slash: bool = True) -> str:
@@ -255,6 +267,12 @@ def collect_export(
             result.warnings.append(
                 f"Skipped {name!r}: an ssh config host already resolves through ~/.ssh/config."
             )
+            result.skipped.append(
+                SkippedHost(
+                    name,
+                    "an ssh config host already resolves through ~/.ssh/config",
+                )
+            )
             continue
         # Resolve the address override before the try: a picker failure (no
         # TTY, bad answer, EOF) must abort the export, not drop one connection.
@@ -267,6 +285,7 @@ def collect_export(
             command = build_ssh_argv(client, info, host_override=host_override)
         except ExportError as exc:
             result.warnings.append(f"Skipped {name!r}: {exc}")
+            result.skipped.append(SkippedHost(name, str(exc)))
             continue
         if agent_resolver is not None:
             attach_agent(command, agent_socket, agent_resolver)
@@ -277,7 +296,103 @@ def collect_export(
         result.hosts, unique_names([host.alias for host in result.hosts]), strict=True
     ):
         host.alias = alias
+        host.patterns = [alias]
+    _extend_gateway_patterns(infos, result.hosts, result.warnings)
     return result
+
+
+#: ssh_config pattern metacharacters; a destination carrying any of them
+#: would expand or negate blocks it has no business matching.
+_PATTERN_META = re.compile(r"[*?\[\]!]")
+
+
+def _config_host_aliases(infos: list[WireRecord]) -> set[str]:
+    """Aliases of skipped sshConfigHost connections.
+
+    Such a gateway's ProxyCommand dials its alias, which already resolves in
+    the user's ~/.ssh/config — extending an exported block for it would be
+    wrong, so the extension stays silent about those.
+    """
+    aliases: set[str] = set()
+    for info in infos:
+        if connection_type(info) != "sshConfigHost":
+            continue
+        cfg = connection_config(info)
+        try:
+            alias = ssh_config_alias(info, cfg)
+        except ExportError:
+            continue
+        if alias:
+            aliases.add(alias)
+    return aliases
+
+
+def _extend_gateway_patterns(
+    infos: list[WireRecord],
+    hosts: list[ExportHost],
+    warnings: list[str],
+) -> None:
+    """Make exported gateway blocks match the host their ProxyCommand dials.
+
+    A ProxyCommand's inner ssh re-reads the config, so the gateway block must
+    carry the destination the command dials or the inner hop loses the
+    gateway's Port, User, IdentityFile, and IdentityAgent. The extension is
+    only applied when the destination *provably* belongs to an exported
+    gateway: matching a name is what proves it, because hostname equality
+    alone can bind the pattern to an unrelated export. Otherwise skip and
+    warn — a missing or colliding block is reported, never silently wrong.
+    """
+    config_hosts = _config_host_aliases(infos)
+    by_name = {host.name: host for host in hosts}
+    by_hostname: dict[str, list[ExportHost]] = {}
+    for host in hosts:
+        by_hostname.setdefault(host.fields.hostname, []).append(host)
+    for host in hosts:
+        destination = _proxy_destination(host.fields.proxy_command)
+        if destination is None:
+            continue
+        # A destination full of pattern metacharacters would turn the block
+        # into a wildcard or negate it; never fold those in.
+        if _PATTERN_META.search(destination):
+            warnings.append(
+                f"{host.name}: ProxyCommand destination {destination!r} contains pattern "
+                "characters; refusing to add it to an exported Host line"
+            )
+            continue
+        if destination in config_hosts:
+            # Owned by the user's ~/.ssh/config; nothing for this file to do.
+            continue
+        # Proving the target by name is the only safe match: a hostname shared
+        # with an unrelated export must not bind the pattern to that block.
+        targets = [t for t in (by_name.get(name) for name in host.gateways) if t is not None]
+        provable = next((t for t in targets if t.fields.hostname == destination), None)
+        if provable is None:
+            matches = by_hostname.get(destination, [])
+            if len(matches) > 1:
+                warnings.append(
+                    f"{host.name}: ProxyCommand destination {destination!r} matches several "
+                    "exported connections; refusing to extend any Host line"
+                )
+            elif len(matches) == 1:
+                warnings.append(
+                    f"{host.name}: ProxyCommand destination {destination!r} matches an "
+                    "exported connection that is not the gateway this hop names; "
+                    "refusing to extend any Host line"
+                )
+            else:
+                warnings.append(
+                    f"{host.name}: ProxyCommand gateway {destination!r} is not in this "
+                    "export; the inner SSH hop will rely on ambient SSH configuration"
+                )
+            continue
+        if destination != provable.alias and destination not in provable.patterns:
+            if any(destination == other.alias for other in hosts if other is not provable):
+                warnings.append(
+                    f"{host.name}: ProxyCommand destination {destination!r} shadows an "
+                    "existing exported alias; refusing to extend the gateway Host line"
+                )
+                continue
+            provable.patterns.append(destination)
 
 
 def _proxy_destination(proxy_command: str | None) -> str | None:
@@ -328,22 +443,11 @@ def render_ssh_config(hosts: list[ExportHost]) -> str:
         "# Include this file from ~/.ssh/config, for example:",
         "#   Include ~/.ssh/config.d/xpipe.conf",
     ]
-    # A ProxyCommand's inner ssh dials the gateway by hostname and re-reads
-    # the config, so the gateway block must match that hostname too. The
-    # extension gives the inner hop the gateway's Port, User, IdentityFile,
-    # and IdentityAgent; without it, exported gateway connections fall back
-    # to ambient settings and fail key authentication.
-    by_hostname = {host.fields.hostname: host for host in hosts}
-    extra_patterns: dict[int, list[str]] = {}
+    # A ProxyCommand's inner ssh re-reads the config, so the gateway block
+    # must match the destination the command dials; collect_export sets the
+    # patterns (with proof of which gateway they extend) at build time.
     for host in hosts:
-        destination = _proxy_destination(host.fields.proxy_command)
-        if destination is None:
-            continue
-        target = by_hostname.get(destination)
-        if target is not None and destination != target.alias:
-            extra_patterns.setdefault(id(target), []).append(destination)
-    for host in hosts:
-        patterns = [host.alias, *extra_patterns.get(id(host), [])]
+        patterns = host.patterns or [host.alias]
         lines.append("")
         lines.append(f"# XPipe connection: {host.name}")
         lines.append(f"Host {' '.join(patterns)}")

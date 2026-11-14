@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -90,20 +89,29 @@ def render_error(message: str, *, no_color: bool = False) -> bool:
     return True
 
 
+#: One source of truth for the auto-open question; both renderers draw from it.
+_OPEN_QUESTION_PREFIX = "XPipe is not running. "
+_OPEN_QUESTION_ACTION = "Open it now with "
+_OPEN_QUESTION_COMMAND = "`xpipe open`"
+_OPEN_QUESTION_SUFFIX = "? [Y/n] "
+_OPEN_QUESTION = (
+    _OPEN_QUESTION_PREFIX + _OPEN_QUESTION_ACTION + _OPEN_QUESTION_COMMAND + _OPEN_QUESTION_SUFFIX
+)
+
+
 def confirm_open(*, no_color: bool = False) -> bool:
     """Ask on stderr whether to launch XPipe; anything but an affirmative answer declines."""
-    question = "XPipe is not running. Open it now with `xpipe open`? [Y/n] "
     console = chrome_console(no_color=no_color, stderr=True)
     if console is not None:
         line = Text()
         line.append("? ", style="bold yellow")
-        line.append("XPipe is not running. ", style="bold")
-        line.append("Open it now with ")
-        line.append("xpipe open", style="cyan")
-        line.append("? [Y/n] ")
+        line.append(_OPEN_QUESTION_PREFIX, style="bold")
+        line.append(_OPEN_QUESTION_ACTION)
+        line.append(_OPEN_QUESTION_COMMAND, style="cyan")
+        line.append(_OPEN_QUESTION_SUFFIX)
         console.print(line, end="")
     else:
-        sys.stderr.write(question)
+        sys.stderr.write(_OPEN_QUESTION)
         sys.stderr.flush()
     line = sys.stdin.readline()
     if not line:  # input ended; act rather than guess
@@ -393,9 +401,6 @@ _EXPORT_TITLES = {
     "ansible": "Ansible inventory",
 }
 
-#: Skipped-connection warnings carry a stable prefix; give them their own panel.
-_SKIPPED_RE = re.compile(r"^Skipped '(.+?)': (.+)$")
-
 
 def render_export_summary(
     result: ExportResult,
@@ -413,20 +418,14 @@ def render_export_summary(
         for warning in result.warnings:
             print(f"warning: {warning}", file=sys.stderr)
         return
-    console = make_console(no_color=no_color, stderr=True)
+    console = chrome_console(no_color=no_color, stderr=True)
     if console is None:
         for warning in result.warnings:
             print(f"warning: {warning}", file=sys.stderr)
         return
     hosts = result.hosts
-    skipped: list[tuple[str, str]] = []
-    notes: list[str] = []
-    for warning in result.warnings:
-        match = _SKIPPED_RE.match(warning)
-        if match:
-            skipped.append((match.group(1), match.group(2)))
-        else:
-            notes.append(warning)
+    skipped = result.skipped
+    notes = [warning for warning in result.warnings if not warning.startswith("Skipped ")]
 
     title = Text(f"XPipe  →  {_EXPORT_TITLES[fmt]}", style="bold")
     subtitle = literal(f"{len(hosts)} connection(s)", style="cyan")
@@ -452,8 +451,8 @@ def render_export_summary(
         skipped_table = Table(title=f"Skipped ({len(skipped)})", box=box.ROUNDED, expand=True)
         skipped_table.add_column("Connection", ratio=2, overflow="fold")
         skipped_table.add_column("Reason", ratio=3, overflow="fold")
-        for name, reason in skipped:
-            skipped_table.add_row(literal(name), literal(reason))
+        for entry in skipped:
+            skipped_table.add_row(literal(entry.name), literal(entry.reason))
         console.print(skipped_table)
     if notes:
         lines = []

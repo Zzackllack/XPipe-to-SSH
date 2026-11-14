@@ -199,6 +199,10 @@ def attach_agent(
     """
     if not command.needs_password_manager_agent:
         return
+    if configured_socket == "none":
+        # The user explicitly refused agent binding; warning about it would
+        # contradict the flag they passed (and fail --strict every time).
+        return
     agent = resolver(
         configured_socket,
         provider=command.agent_provider,

@@ -27,8 +27,8 @@ and Ansible inventory exports.
 ## When XPipe is not running
 
 If the CLI cannot reach the XPipe daemon, it offers to start it — on
-interactive terminals only, after the connection check fails and before any
-work begins:
+interactive terminals only (stderr must be a terminal too), after the
+connection check fails and before any work begins:
 
 ```text
 XPipe is not running. Open it now with `xpipe open`? [Y/n]
@@ -193,7 +193,9 @@ address is offered the same numbered menu as `--pick-host`, and the chosen
 address is written into the document. Your answer is kept per connection, so
 a connection with a single address is never asked about. `--pick-hosts`
 requires `--export` and an interactive terminal; with `--shell json` the
-menus stay on stderr so stdout remains machine readable.
+menus stay on stderr so stdout remains machine readable. An answer that is
+out of range, empty of input, or an interrupt aborts the whole export with
+exit code 2 and writes no file; the document is never half-written.
 
 `--output PATH` writes the document to a file instead of stdout; `-` means
 stdout. An existing file is never overwritten unless `--force` is given, and a
@@ -238,8 +240,12 @@ Use `--strict` to reject such a command in automation.
   to stderr. The `--pick-host` menu is terminal chrome and also goes to stderr,
   so `--shell json` output stays parseable while selecting an address. On an
   interactive terminal, errors render as a red panel and status notes as
-  one-liners instead of plain text; piped output, `--plain`, and `--shell json`
-  never see panels, and the exact bytes they produce are unchanged.
+  one-liners instead of plain text; piped output, `--plain`, and `--shell
+  json` never see panels. Machine-readable bytes are unchanged: JSON error
+  payloads, exit codes, and `--plain` output are identical to before. The one
+  exception is `--help`, which is rendered by rich-argparse (heading case and
+  layout differ, colors on a tty); scripts that need a stable shape should
+  parse JSON, not help text.
 - JSON command output has `schemaVersion: 1`, `connection`, `env`, `argv`, and
   `warnings`, plus `provenance` when `--explain` is given. JSON listing has
   `schemaVersion: 1` and `connections` with names, UUIDs, types, hosts,

@@ -12,7 +12,7 @@ from unittest import mock
 
 import yaml
 
-from tests.test_daemon import fake_tty_stdin
+from tests.test_daemon import TtyStderr, fake_tty_stdin
 from xpipe_to_ssh.cli import AppDependencies, main
 from xpipe_to_ssh.errors import ExportOutputError, InternalError, XPipeError
 from xpipe_to_ssh.export import (
@@ -256,6 +256,116 @@ class SerializerTests(unittest.TestCase):
 
         self.assertIn("Host default/routed\n", text)
         self.assertNotIn("Host default/routed gw.example", text)
+
+    def test_gateway_extension_binds_to_the_gateway_not_to_a_hostname_clone(self) -> None:
+        # An unrelated connection dials out through an identically named host.
+        # The extension must land on the gateway the ProxyCommand was built
+        # for, never on the clone (which sorts later, so the old last-wins
+        # hostname map would have preferred it).
+        gateway = ssh_info("gw", "default", "road", "gateway", host="gw.example", port=2222)
+        clone = ssh_info(
+            "db",
+            "zzzz",
+            "zz-db",
+            host="gw.example",
+            identity={
+                "type": "inPlace",
+                "identityStore": {
+                    "type": "localIdentity",
+                    "username": "bob",
+                    "sshIdentity": {"type": "none"},
+                },
+            },
+        )
+        routed = ssh_info("web", "default", "web", host="web.example", gateway="gw")
+        client = MultiClient([gateway, routed, clone])
+
+        text = render_export(
+            ExportResult(hosts=collect_export(client, list(client.records.values())).hosts),
+            "ssh-config",
+        )
+
+        self.assertIn("Host default/road/gateway gw.example", text)
+        self.assertNotIn("Host zzzz/zz-db gw.example", text)
+
+    def test_gateway_extension_is_deduped_for_shared_gateways(self) -> None:
+        gateway = ssh_info("gw", "default", "gateway", host="gw.example")
+        alpha = ssh_info("a", "default", "alpha", host="alpha.example", gateway="gw")
+        beta = ssh_info("b", "default", "beta", host="beta.example", gateway="gw")
+        client = MultiClient([gateway, alpha, beta])
+
+        text = render_export(
+            ExportResult(hosts=collect_export(client, list(client.records.values())).hosts),
+            "ssh-config",
+        )
+
+        self.assertEqual(text.count("Host default/gateway gw.example"), 1)
+
+    def test_gateway_extension_warns_instead_of_guessing_on_hostname_collisions(self) -> None:
+        # The gateway is excluded from the export (like --filter would do), and
+        # two unrelated exported connections carry the same hostname.
+        gateway = ssh_info("gw", "default", "road", "gateway", host="gw.example", port=2222)
+        clone_one = ssh_info("one", "default", "one", host="gw.example")
+        clone_two = ssh_info("two", "zzzz", "two", host="gw.example")
+        routed = ssh_info("web", "default", "web", host="web.example", gateway="gw")
+        client = MultiClient([gateway, clone_one, clone_two, routed])
+        infos = [clone_one, clone_two, routed]
+
+        result = collect_export(client, infos)
+
+        self.assertTrue(
+            any("matches several exported connections" in warning for warning in result.warnings)
+        )
+        text = render_export(ExportResult(hosts=result.hosts), "ssh-config")
+        self.assertNotIn("Host default/one gw.example", text)
+        self.assertNotIn("Host zzzz/two gw.example", text)
+
+    def test_gateway_extension_warns_when_the_gateway_is_not_in_the_export(self) -> None:
+        gateway = ssh_info("gw", "default", "road", "gateway", host="gw.example", port=2222)
+        routed = ssh_info("web", "default", "web", host="web.example", gateway="gw")
+        client = MultiClient([gateway, routed])
+
+        result = collect_export(client, [routed])
+
+        self.assertTrue(any("is not in this export" in warning for warning in result.warnings))
+
+    def test_gateway_extension_refuses_pattern_characters(self) -> None:
+        gateway = ssh_info("gw", "default", "gateway", host="*.internal")
+        routed = ssh_info("web", "default", "web", host="web.example", gateway="gw")
+        client = MultiClient([gateway, routed])
+
+        result = collect_export(client, list(client.records.values()))
+
+        self.assertTrue(any("pattern characters" in warning for warning in result.warnings))
+        text = render_export(ExportResult(hosts=result.hosts), "ssh-config")
+        self.assertNotIn("*.internal", text.split("Host default/gateway", 1)[1].split("\n", 1)[0])
+
+    def test_gateway_extension_never_shadows_an_unrelated_alias(self) -> None:
+        # An unrelated connection exports under an alias identical to the
+        # gateway's hostname; grafting it onto the gateway block would
+        # shadow that block's directives for every caller.
+        routed = ssh_info("web", "default", "web", host="web.example", gateway="gw")
+        gateway = ssh_info("gw", "default", "jump", "box", host="gw.example")
+        clone = ssh_info("clone", "gw.example", host="192.0.2.1")
+        client = MultiClient([gateway, routed, clone])
+
+        result = collect_export(client, list(client.records.values()))
+
+        self.assertTrue(
+            any("shadows an existing exported alias" in warning for warning in result.warnings)
+        )
+        text = render_export(ExportResult(hosts=result.hosts), "ssh-config")
+        self.assertNotIn("Host default/jump/box gw.example", text)
+        self.assertIn("Host gw.example\n", text)
+
+    def test_gateway_extension_stays_silent_for_an_ssh_config_host(self) -> None:
+        cfg_host = config_host_info("cfg", "local machine", "jump", alias="jump")
+        routed = ssh_info("web", "default", "web", host="web.example", gateway="cfg")
+        client = MultiClient([cfg_host, routed])
+
+        result = collect_export(client, list(client.records.values()))
+
+        self.assertFalse(any("is not in this export" in warning for warning in result.warnings))
 
     def test_ssh_config_includes_gateway_forwarding_and_extra_options(self) -> None:
         text = render_export(ExportResult(hosts=exported_hosts(sample_client())), "ssh-config")
@@ -675,13 +785,6 @@ class AgentExportTests(unittest.TestCase):
         self.assertIn('    IdentityAgent "/tmp/my agents/agent.sock"', text)
 
 
-class TtyStderr(io.StringIO):
-    """A StringIO that Rich treats as a terminal."""
-
-    def isatty(self) -> bool:
-        return True
-
-
 class ExportTuiTests(unittest.TestCase):
     def test_pretty_export_renders_a_summary_on_a_tty(self) -> None:
         client = sample_client()
@@ -939,6 +1042,43 @@ class PickHostsExportTests(unittest.TestCase):
                         main(argv, AppDependencies(client_factory=lambda _: client)), 2
                     )
                 self.assertIn("--pick-hosts requires --export", stderr.getvalue())
+
+    def test_agent_socket_none_disables_binding_silently_and_strict_passes(self) -> None:
+        client = MultiClient([agent_info("c", "default", "alpha", identifier="bitwarden")])
+        resolver_calls: list[str] = []
+
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            result = main(
+                ["--export", "ssh-config", "--agent-socket", "none", "--strict"],
+                AppDependencies(
+                    client_factory=lambda _: client,
+                    agent_resolver=lambda socket, **_kwargs: resolver_calls.append(socket) or None,
+                ),
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(resolver_calls, [])
+        self.assertNotIn("no matching usable agent socket", err.getvalue())
+        self.assertNotIn("IdentityAgent", out.getvalue())
+
+    def test_pretty_skipped_panel_handles_quotes_in_connection_names(self) -> None:
+        client = MultiClient([ssh_info("bad", "default", "b'a'd", host="bad host")])
+        out, err = io.StringIO(), TtyStderr()
+        with (
+            mock.patch("xpipe_to_ssh.presentation.RICH_AVAILABLE", True),
+            contextlib.redirect_stdout(out),
+            mock.patch("sys.stderr", err),
+        ):
+            result = main(
+                ["--export", "ssh-config"],
+                AppDependencies(client_factory=lambda _: client),
+            )
+
+        self.assertEqual(result, 0)
+        rendered = err.getvalue()
+        self.assertIn("Skipped (1)", rendered)
+        self.assertIn("b'a'd", rendered)
 
 
 if __name__ == "__main__":

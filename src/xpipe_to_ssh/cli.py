@@ -438,6 +438,9 @@ def may_offer_open(options: CliOptions) -> bool:
         return False
     if not sys.stdin.isatty():
         return False
+    # The prompt goes to stderr; if stderr is a pipe, it lands in a log file.
+    if not sys.stderr.isatty():
+        return False
     # Never offer a launch we cannot perform.
     return shutil.which("xpipe") is not None
 

@@ -2,12 +2,13 @@
 
 The CLI can only reach XPipe through the local HTTP API, so "XPipe is not
 running" shows up either while constructing the client (no beacon-auth file)
-or on the first handshake (connection refused, reset, or blackholed). When
-that happens on an interactive terminal, the user is offered to launch XPipe
-with ``xpipe open`` and the operation is retried once. Anything short of that
+or on the first handshake (connection refused or reset). When that happens
+on an interactive terminal, the user is offered to launch XPipe with
+``xpipe open`` and the operation is retried once. Anything short of that
 (missing beacon-auth from another user's daemon, an HTTP API that rejects
-authentication, a daemon that answers with garbage) gets the plain error
-message, because relaunching would not fix it.
+authentication, the CLI's own request-deadline expiring, a daemon that
+answers with garbage) gets the plain error message, because relaunching
+would not fix it.
 """
 
 from __future__ import annotations
@@ -128,6 +129,10 @@ def wait_for_daemon(
     no_color: bool = False,
 ) -> object:
     """Poll until the freshly opened XPipe answers, then return a verified client."""
+    # Each iteration blocks up to PROBE_TIMEOUT on the (bounded) daemon_version
+    # call, so a blackholed daemon accumulates at most one orphaned worker per
+    # iteration inside the 60s window; these are daemon threads that die with
+    # the process, so the waste is bounded and harmless.
     render_note("Waiting for XPipe to start…", style="cyan", no_color=no_color)
     deadline = time.monotonic() + timeout
     while True:

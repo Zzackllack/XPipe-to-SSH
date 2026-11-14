@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 import subprocess
 import sys
 import unittest
@@ -309,7 +310,7 @@ class AutoOpenEndToEndTests(unittest.TestCase):
             mock.patch("xpipe_to_ssh.cli.shutil.which", return_value="/usr/local/bin/xpipe"),
             fake_tty_stdin("y\n"),
             contextlib.redirect_stdout(output),
-            contextlib.redirect_stderr(io.StringIO()),
+            contextlib.redirect_stderr(TtyStderr()),
         ):
             result = main(["--list"], AppDependencies(opener=opener))
         self.assertEqual(result, 0)
@@ -317,7 +318,7 @@ class AutoOpenEndToEndTests(unittest.TestCase):
 
     def test_list_declined_offer_keeps_the_error_exit(self) -> None:
         client = FlakyClient()
-        error = io.StringIO()
+        error = TtyStderr()
         with (
             mock.patch("xpipe_to_ssh.cli.default_client", lambda _: client),
             mock.patch("xpipe_to_ssh.cli.shutil.which", return_value="/usr/local/bin/xpipe"),
@@ -329,10 +330,25 @@ class AutoOpenEndToEndTests(unittest.TestCase):
         self.assertIn("Could not reach the XPipe daemon", error.getvalue())
         self.assertFalse(client.up)
 
+    def test_non_tty_stderr_means_no_offer_even_with_tty_stdin(self) -> None:
+        # The prompt is written to stderr; a piped stderr would swallow it.
+        client = FlakyClient()
+        error = io.StringIO()
+        with (
+            mock.patch("xpipe_to_ssh.cli.default_client", lambda _: client),
+            mock.patch("xpipe_to_ssh.cli.shutil.which", return_value="/usr/local/bin/xpipe"),
+            fake_tty_stdin("y\n"),
+            contextlib.redirect_stderr(error),
+        ):
+            result = main(["--list"], AppDependencies(opener=lambda: None))
+        self.assertEqual(result, 1)
+        self.assertNotIn("xpipe open", error.getvalue())
+        self.assertFalse(client.up)
+
     def test_json_mode_never_prompts_even_on_a_tty(self) -> None:
         client = FlakyClient()
         output = io.StringIO()
-        error = io.StringIO()
+        error = TtyStderr()
         with (
             mock.patch("xpipe_to_ssh.cli.default_client", lambda _: client),
             fake_tty_stdin("y\n"),
@@ -359,7 +375,7 @@ class AutoOpenEndToEndTests(unittest.TestCase):
             mock.patch("xpipe_to_ssh.cli.shutil.which", return_value="/usr/local/bin/xpipe"),
             fake_tty_stdin("y\n"),
             contextlib.redirect_stdout(output),
-            contextlib.redirect_stderr(io.StringIO()),
+            contextlib.redirect_stderr(TtyStderr()),
         ):
             result = main(["test", "--plain"], AppDependencies(opener=opener))
         self.assertEqual(result, 0)
@@ -368,3 +384,92 @@ class AutoOpenEndToEndTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MayOfferOpenTests(unittest.TestCase):
+    """The offer to launch XPipe must only happen in a truly interactive run."""
+
+    def test_non_interactive_run_does_not_offer_to_open_xpipe(self) -> None:
+        from xpipe_to_ssh.cli import may_offer_open, parse_options
+
+        def offer(argv: list[str], env: dict[str, str] | None = None) -> bool:
+            clean = {"XPIPE_TO_SSH_CONFIG": "/dev/null", **(env or {})}
+            with mock.patch.dict(os.environ, clean, clear=False):
+                _parser, options = parse_options(argv)
+                with (
+                    mock.patch(
+                        "xpipe_to_ssh.cli.shutil.which", return_value="/usr/local/bin/xpipe"
+                    ),
+                    mock.patch("sys.stdin", TtyStderr()),
+                    mock.patch("sys.stderr", TtyStderr()),
+                ):
+                    return may_offer_open(options)
+
+        self.assertTrue(offer(["--list"]))
+
+        cases = (
+            (["--list", "--shell", "json"], None, "json output"),
+            (["--list", "--ptb"], None, "PTB builds"),
+            (["--list"], {"XPIPE_BEACON_PORT": "21729"}, "custom beacon port"),
+        )
+        for argv, env, label in cases:
+            with self.subTest(case=label):
+                self.assertFalse(offer(argv, env))
+
+        with self.subTest(case="piped stdin"):
+            with mock.patch.dict(os.environ, {"XPIPE_TO_SSH_CONFIG": "/dev/null"}, clear=False):
+                _parser, options = parse_options(["--list"])
+            with (
+                mock.patch("xpipe_to_ssh.cli.shutil.which", return_value="/usr/local/bin/xpipe"),
+                mock.patch("sys.stdin", io.StringIO("")),
+                mock.patch("sys.stderr", TtyStderr()),
+            ):
+                self.assertFalse(may_offer_open(options))
+
+        with self.subTest(case="piped stderr"):
+            with mock.patch.dict(os.environ, {"XPIPE_TO_SSH_CONFIG": "/dev/null"}, clear=False):
+                _parser, options = parse_options(["--list"])
+            with (
+                mock.patch("xpipe_to_ssh.cli.shutil.which", return_value="/usr/local/bin/xpipe"),
+                mock.patch("sys.stdin", TtyStderr()),
+                mock.patch("sys.stderr", io.StringIO("")),
+            ):
+                self.assertFalse(may_offer_open(options))
+
+        with self.subTest(case="xpipe CLI missing"):
+            with mock.patch.dict(os.environ, {"XPIPE_TO_SSH_CONFIG": "/dev/null"}, clear=False):
+                _parser, options = parse_options(["--list"])
+            with (
+                mock.patch("xpipe_to_ssh.cli.shutil.which", return_value=None),
+                mock.patch("sys.stdin", TtyStderr()),
+                mock.patch("sys.stderr", TtyStderr()),
+            ):
+                self.assertFalse(may_offer_open(options))
+
+
+class OpenXPipeTests(unittest.TestCase):
+    def test_launch_detaches_from_the_interactive_terminal(self) -> None:
+        from xpipe_to_ssh import daemon
+
+        captured: dict[str, object] = {}
+
+        class PopenStub:  # a stand-in the assertion can inspect
+            def __init__(self, args: object, **kwargs: object) -> None:
+                captured["args"] = args
+                captured["kwargs"] = kwargs
+
+        with (
+            mock.patch.object(daemon.shutil, "which", return_value="/usr/local/bin/xpipe"),
+            mock.patch.object(daemon.subprocess, "Popen", PopenStub),
+        ):
+            daemon.open_xpipe()
+
+        import subprocess as real_subprocess
+
+        self.assertEqual(captured["args"], ["/usr/local/bin/xpipe", "open"])
+        kwargs = captured["kwargs"]
+        assert isinstance(kwargs, dict)
+        self.assertIs(kwargs["stdin"], real_subprocess.DEVNULL)
+        self.assertIs(kwargs["stdout"], real_subprocess.DEVNULL)
+        self.assertIs(kwargs["stderr"], real_subprocess.DEVNULL)
+        self.assertTrue(kwargs["start_new_session"])
