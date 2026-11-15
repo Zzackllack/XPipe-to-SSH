@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .agents import provider_for_path
 from .errors import ExportError
 from .models import SSHCommand
 from .rendering import address_kind, provenance
@@ -23,6 +25,8 @@ from .xpipe import (
 if TYPE_CHECKING:
     from rich.console import Console
     from rich.table import Table
+
+    from .export import ExportFormat, ExportResult
 
 try:
     from rich import box
@@ -42,6 +46,77 @@ def make_console(*, no_color: bool = False, stderr: bool = False) -> Console | N
     if not RICH_AVAILABLE:
         return None
     return Console(no_color=no_color, stderr=stderr, highlight=False)
+
+
+def chrome_console(*, no_color: bool = False, stderr: bool = True) -> Console | None:
+    """Colored console for UI chrome, or None when output should stay plain.
+
+    This is the one place the "interactive terminal means Rich, piped means
+    plain text" rule lives. Callers still own format-specific gates
+    (``--shell json``, ``--plain``); this helper only answers "can we draw on
+    this stream?".
+    """
+    if not RICH_AVAILABLE:
+        return None
+    stream = sys.stderr if stderr else sys.stdout
+    if not stream.isatty():
+        return None
+    return Console(no_color=no_color, stderr=stderr, highlight=False)
+
+
+def render_note(message: str, *, style: str = "dim", no_color: bool = False) -> None:
+    """One-line status note on stderr; plain text when piped or without Rich."""
+    console = chrome_console(no_color=no_color, stderr=True)
+    if console is None:
+        print(message, file=sys.stderr)
+        return
+    console.print(Text(message, style=style))
+
+
+def render_error(message: str, *, no_color: bool = False) -> bool:
+    """Failure panel on stderr; returns False when plain output is required.
+
+    The ``error: `` prefix is kept inside the panel so consumers that grep
+    stderr for it keep working in both modes.
+    """
+    console = chrome_console(no_color=no_color, stderr=True)
+    if console is None:
+        return False
+    text = Text()
+    text.append("error: ", style="bold red")
+    text.append(message)
+    console.print(Panel(Group(text), border_style="red", padding=(0, 1)))
+    return True
+
+
+#: One source of truth for the auto-open question; both renderers draw from it.
+_OPEN_QUESTION_PREFIX = "XPipe is not running. "
+_OPEN_QUESTION_ACTION = "Open it now with "
+_OPEN_QUESTION_COMMAND = "`xpipe open`"
+_OPEN_QUESTION_SUFFIX = "? [Y/n] "
+_OPEN_QUESTION = (
+    _OPEN_QUESTION_PREFIX + _OPEN_QUESTION_ACTION + _OPEN_QUESTION_COMMAND + _OPEN_QUESTION_SUFFIX
+)
+
+
+def confirm_open(*, no_color: bool = False) -> bool:
+    """Ask on stderr whether to launch XPipe; anything but an affirmative answer declines."""
+    console = chrome_console(no_color=no_color, stderr=True)
+    if console is not None:
+        line = Text()
+        line.append("? ", style="bold yellow")
+        line.append(_OPEN_QUESTION_PREFIX, style="bold")
+        line.append(_OPEN_QUESTION_ACTION)
+        line.append(_OPEN_QUESTION_COMMAND, style="cyan")
+        line.append(_OPEN_QUESTION_SUFFIX)
+        console.print(line, end="")
+    else:
+        sys.stderr.write(_OPEN_QUESTION)
+        sys.stderr.flush()
+    line = sys.stdin.readline()
+    if not line:  # input ended; act rather than guess
+        return False
+    return line.strip().lower() in ("", "y", "yes")
 
 
 def literal(value: object, *, style: str | None = None) -> Text:
@@ -280,12 +355,16 @@ def address_by_number(available: list[str], answer: str) -> str:
 
 
 def choose_host_interactively(
-    current: str | None, available: list[str], *, no_color: bool
+    current: str | None,
+    available: list[str],
+    *,
+    no_color: bool,
+    flag_name: str = "--pick-host",
 ) -> str | None:
     if len(available) <= 1:
         return current
     if not sys.stdin.isatty():
-        raise ExportError("--pick-host requires an interactive terminal")
+        raise ExportError(f"{flag_name} requires an interactive terminal")
     # The menu is terminal chrome: keep stdout reserved for the rendered command.
     if RICH_AVAILABLE:
         console = make_console(no_color=no_color, stderr=True)
@@ -313,3 +392,75 @@ def choose_host_interactively(
     for index, host in enumerate(available, 1):
         print(f"{index}. {host}{' (selected)' if host == current else ''}", file=sys.stderr)
     return address_by_number(available, read_selection("Address number: "))
+
+
+_EXPORT_TITLES = {
+    "ssh-config": "SSH config",
+    "yaml": "YAML",
+    "json": "JSON",
+    "ansible": "Ansible inventory",
+}
+
+
+def render_export_summary(
+    result: ExportResult,
+    fmt: ExportFormat,
+    *,
+    no_color: bool = False,
+) -> None:
+    """Render the export outcome as panels on stderr.
+
+    The document itself stays on stdout; this is chrome for humans watching a
+    terminal. Skipped connections get their own table, remaining warnings the
+    same treatment as command warnings, and scripts keep the plain output.
+    """
+    if not RICH_AVAILABLE:
+        for warning in result.warnings:
+            print(f"warning: {warning}", file=sys.stderr)
+        return
+    console = chrome_console(no_color=no_color, stderr=True)
+    if console is None:
+        for warning in result.warnings:
+            print(f"warning: {warning}", file=sys.stderr)
+        return
+    hosts = result.hosts
+    skipped = result.skipped
+    notes = [warning for warning in result.warnings if not warning.startswith("Skipped ")]
+
+    title = Text(f"XPipe  →  {_EXPORT_TITLES[fmt]}", style="bold")
+    subtitle = literal(f"{len(hosts)} connection(s)", style="cyan")
+    console.print(Panel.fit(Group(title, subtitle), border_style="cyan", padding=(0, 2)))
+
+    if hosts:
+        table = Table(title=f"Exported ({len(hosts)})", box=box.ROUNDED, expand=True)
+        table.add_column("Connection", ratio=3, overflow="fold")
+        table.add_column("Target", ratio=2, overflow="fold")
+        table.add_column("Port", width=6, justify="right")
+        table.add_column("Agent", width=12, no_wrap=True)
+        for host in hosts:
+            agent = provider_for_path(Path(host.identity_agent))[0] if host.identity_agent else "—"
+            port = host.fields.port
+            table.add_row(
+                literal(host.name),
+                literal(host.fields.hostname),
+                literal(str(port) if port is not None else "—"),
+                literal(agent),
+            )
+        console.print(table)
+    if skipped:
+        skipped_table = Table(title=f"Skipped ({len(skipped)})", box=box.ROUNDED, expand=True)
+        skipped_table.add_column("Connection", ratio=2, overflow="fold")
+        skipped_table.add_column("Reason", ratio=3, overflow="fold")
+        for entry in skipped:
+            skipped_table.add_row(literal(entry.name), literal(entry.reason))
+        console.print(skipped_table)
+    if notes:
+        lines = []
+        for note in notes:
+            line = Text()
+            line.append("! ", style="bold yellow")
+            line.append(note)
+            lines.append(line)
+        console.print(Panel(Group(*lines), title=f"Warnings ({len(notes)})", border_style="yellow"))
+    if not hosts and not skipped and not notes:
+        console.print(literal("No exportable connections.", style="dim"))

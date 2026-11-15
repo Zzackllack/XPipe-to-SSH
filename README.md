@@ -24,6 +24,25 @@ instances require the client to be configured with a token and base URL; this
 CLI intentionally constructs the local client only. `pyyaml` renders the YAML
 and Ansible inventory exports.
 
+## When XPipe is not running
+
+If the CLI cannot reach the XPipe daemon, it offers to start it — on
+interactive terminals only (stderr must be a terminal too), after the
+connection check fails and before any work begins:
+
+```text
+XPipe is not running. Open it now with `xpipe open`? [Y/n]
+```
+
+Answering yes launches `xpipe open` (which starts the daemon and opens the
+application) and the CLI waits up to 60 seconds for the local HTTP API to
+answer before continuing; answering no prints the usual error. `--shell json`
+and non-interactive terminals never see the prompt. The offer is also skipped
+for `--ptb` and for `XPIPE_BEACON_PORT` overrides, because a plain
+`xpipe open` starts the release build. When XPipe is running but rejects
+authentication — the HTTP API is disabled or XPipe is locked — reopening
+would not help, so the CLI reports that instead of offering a restart.
+
 ## Installation
 
 ```bash
@@ -118,7 +137,15 @@ arguments. Use a fixed or deliberately constructed command string.
 ## Bulk export
 
 Export every saved connection at once instead of one command at a time. A
-`--filter` narrows the set at the daemon, exactly as with `--list`.
+`--filter` narrows the set at the daemon, exactly as with `--list`. On an
+interactive terminal the export shows a summary on stderr while it runs and
+after it finishes: a header, a table of exported connections with their
+ports and agent bindings, a `Skipped` table for connections that could not
+be exported, and the usual warnings. The document itself stays on stdout, so
+`xpipe-to-ssh --export ssh-config > ssh.conf` works as before; the summary is
+terminal chrome only. Non-interactive terminals and `--shell json` keep the
+plain `warning:` lines, and `--pick-hosts` menus are shown instead of the
+spinner while you answer.
 
 ```bash
 xpipe-to-ssh --export ssh-config                              # OpenSSH config on stdout
@@ -126,22 +153,49 @@ xpipe-to-ssh --export ssh-config --output ~/.ssh/config.d/xpipe.conf
 xpipe-to-ssh --export yaml --output hosts.yaml
 xpipe-to-ssh --export ansible --output inventory.yml
 xpipe-to-ssh --export json --filter '**prod**'
+xpipe-to-ssh --export ssh-config --pick-hosts    # ask which address to use, per connection
 ```
 
 Formats:
 
 - `ssh-config` - an OpenSSH client config. Each connection becomes a
   `Host <alias>` block with `HostName`, `User`, `Port`, `IdentityFile`,
-  `ForwardX11`, a `ProxyCommand` for a gateway hop, and any
-  `additionalOptions`. The alias is the full XPipe path with whitespace and
-  glob characters folded to `-`, for example `Host default/oracle-oc1`.
-  Include the generated file from `~/.ssh/config`.
+  `ForwardX11`, a `ProxyCommand` for a gateway hop, `IdentityAgent` for a
+  password-manager-agent connection, and any `additionalOptions`. The alias
+  is the full XPipe path with whitespace and glob characters folded to `-`,
+  for example `Host default/oracle-oc1`. A connection whose ProxyCommand
+  delegates to an exported gateway expands the gateway's `Host` line with
+  the destination the command dials (for example `Host default/gateway
+  gw.example`), so the inner ssh hop re-reading the config picks up the
+  gateway's Port, User, IdentityFile, and IdentityAgent. Include the
+  generated file from `~/.ssh/config`.
 - `yaml` - the same fields as an ordered `hosts:` list, for tooling that reads
   a `hosts.yaml`/`hosts.yml`.
 - `ansible` - an Ansible inventory (`all.hosts`) with `ansible_host`,
   `ansible_user`, `ansible_port`, `ansible_ssh_private_key_file`, and
   `ansible_ssh_common_args` for gateways and extra options.
 - `json` - structured output with `schemaVersion` and `generator`.
+
+Connections whose identity is a password-manager SSH agent cannot
+authenticate without knowing the agent socket, so the export binds them the
+same way the single-command path does: a machine-specific `IdentityAgent`
+in `ssh-config`, an `IdentityAgent=...` in `ansible_ssh_common_args`, or an
+`identityAgent` field in `yaml`/`json` records. If no matching socket is
+found, the connection is exported with a warning instead of failing
+silently; `--strict` turns that into a failure. `--agent-socket PATH` forces
+one socket for the whole export instead of auto-discovering per connection,
+and `--agent-socket none` disables agent binding entirely.
+
+Connections that store several available addresses export the one XPipe has
+selected. To choose per connection while exporting, pass `--pick-hosts`
+(interactive terminals only): every connection with more than one available
+address is offered the same numbered menu as `--pick-host`, and the chosen
+address is written into the document. Your answer is kept per connection, so
+a connection with a single address is never asked about. `--pick-hosts`
+requires `--export` and an interactive terminal; with `--shell json` the
+menus stay on stderr so stdout remains machine readable. An answer that is
+out of range, empty of input, or an interrupt aborts the whole export with
+exit code 2 and writes no file; the document is never half-written.
 
 `--output PATH` writes the document to a file instead of stdout; `-` means
 stdout. An existing file is never overwritten unless `--force` is given, and a
@@ -184,7 +238,14 @@ Use `--strict` to reject such a command in automation.
 
 - Normal command output is written to stdout; warnings and text-mode errors go
   to stderr. The `--pick-host` menu is terminal chrome and also goes to stderr,
-  so `--shell json` output stays parseable while selecting an address.
+  so `--shell json` output stays parseable while selecting an address. On an
+  interactive terminal, errors render as a red panel and status notes as
+  one-liners instead of plain text; piped output, `--plain`, and `--shell
+  json` never see panels. Machine-readable bytes are unchanged: JSON error
+  payloads, exit codes, and `--plain` output are identical to before. The one
+  exception is `--help`, which is rendered by rich-argparse (heading case and
+  layout differ, colors on a tty); scripts that need a stable shape should
+  parse JSON, not help text.
 - JSON command output has `schemaVersion: 1`, `connection`, `env`, `argv`, and
   `warnings`, plus `provenance` when `--explain` is given. JSON listing has
   `schemaVersion: 1` and `connections` with names, UUIDs, types, hosts,
@@ -192,7 +253,9 @@ Use `--strict` to reject such a command in automation.
   or when an `ssh config` host owns its own port. `--export json` has its own
   `schemaVersion: 1` document with `generator` and a `hosts` array.
 - Bulk export writes the document to stdout, or to `--output`; warnings and the
-  `wrote ...` line go to stderr, so a redirected document stays clean.
+  `wrote ...` line go to stderr, so a redirected document stays clean. On a
+  terminal, the summary panels go to stderr as well, so stdout never carries
+  chrome either.
 - JSON failures have `schemaVersion: 1` and an `error` object with a stable
   `code` and `message`. Ambiguous selectors also include `candidates` with
   names and XPipe IDs. They are printed on stdout so agents can parse them.

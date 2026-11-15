@@ -6,11 +6,11 @@ import os
 import shutil
 import stat
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from .errors import AgentError
-from .models import AgentProbe, AgentSocket
+from .models import AgentProbe, AgentSocket, SSHCommand
 
 #: Password-manager products whose agent socket this CLI can recognize.
 KNOWN_PROVIDERS = ("bitwarden", "1password", "pageant")
@@ -31,7 +31,9 @@ def provider_hint(provider: str | None, identifier: str | None) -> str | None:
     return None
 
 
-def _provider_for(path: Path) -> tuple[str, str | None]:
+def provider_for_path(path: Path) -> tuple[str, str | None]:
+    """Best-effort label and provider name for a discovered agent socket."""
+
     normalized = str(path).casefold()
     if "bitwarden" in normalized:
         return "Bitwarden", "bitwarden"
@@ -116,7 +118,7 @@ def probe_agent(
 
 
 def _socket(path: Path, probe: AgentProbe) -> AgentSocket:
-    label, provider = _provider_for(path)
+    label, provider = provider_for_path(path)
     return AgentSocket(
         str(path),
         label,
@@ -180,3 +182,42 @@ def resolve_agent_socket(
     if wanted:
         return None
     return existing[0] if existing else None
+
+
+def attach_agent(
+    command: SSHCommand,
+    configured_socket: str,
+    resolver: Callable[..., AgentSocket | None],
+) -> None:
+    """Attach a resolved password-manager agent to a command, in place.
+
+    Shared by the single-command path and the bulk exporter so both agree on
+    *which* socket an agent-gated connection gets. An unusable or missing
+    socket is a warning on the command, not an error; an explicitly configured
+    socket that cannot be opened is an ``AgentError`` and aborts, because the
+    caller typed that path by hand.
+    """
+    if not command.needs_password_manager_agent:
+        return
+    if configured_socket == "none":
+        # The user explicitly refused agent binding; warning about it would
+        # contradict the flag they passed (and fail --strict every time).
+        return
+    agent = resolver(
+        configured_socket,
+        provider=command.agent_provider,
+        identifier=command.agent_identifier,
+    )
+    if agent:
+        command.agent = agent
+        command.env["SSH_AUTH_SOCK"] = agent.path
+        if agent.identity_count == 0:
+            detail = f" ({agent.probe_error})" if agent.probe_error else ""
+            command.warnings.append(
+                f"{agent.label} socket was found, but ssh-add reported no identities{detail}."
+            )
+        return
+    command.warnings.append(
+        "This connection uses a password-manager SSH agent, but no matching usable "
+        "agent socket was found. Pass --agent-socket PATH."
+    )

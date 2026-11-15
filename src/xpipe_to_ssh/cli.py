@@ -5,17 +5,32 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import traceback
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from subprocess import Popen
 from typing import Never, cast
 
+try:
+    from rich_argparse import RichHelpFormatter
+
+    class _HelpFormatter(RichHelpFormatter):
+        # Bracket-heavy help texts must not be parsed as console markup.
+        help_markup = False
+        text_markup = False
+
+    _HELP_FORMATTER: type[argparse.HelpFormatter] = _HelpFormatter
+except ImportError:  # pragma: no cover - exercised in minimal installations
+    _HELP_FORMATTER = argparse.HelpFormatter
+
 from . import __version__
-from .agents import resolve_agent_socket
+from .agents import attach_agent, resolve_agent_socket
 from .clipboard import copy_to_clipboard
 from .config import load_settings
+from .daemon import ensure_client
 from .errors import (
     EXIT_OK,
     ExecutionError,
@@ -30,6 +45,7 @@ from .export import (
     EXPORT_CHOICES,
     STDOUT_TARGET,
     ExportFormat,
+    ExportResult,
     collect_export,
     render_export,
     write_document,
@@ -38,8 +54,13 @@ from .models import AgentSocket, SSHCommand
 from .presentation import (
     RICH_AVAILABLE,
     choose_host_interactively,
+    chrome_console,
+    confirm_open,
     render_dashboard,
+    render_error,
+    render_export_summary,
     render_list,
+    render_note,
     render_provenance,
 )
 from .rendering import SHELL_CHOICES, Shell, render
@@ -67,6 +88,7 @@ class CliOptions:
     agent_socket: str
     host: str | None
     pick_host: bool
+    pick_hosts: bool
     connect: bool
     remote_command: str | None
     ssh_args: list[str]
@@ -87,6 +109,8 @@ class AppDependencies:
     clipboard: Callable[[str], str] = copy_to_clipboard
     executor: Callable[[list[str], dict[str, str]], None] | None = None
     agent_resolver: Callable[..., AgentSocket | None] = resolve_agent_socket
+    # Launches XPipe (defaults to `xpipe open`); injectable so tests never spawn it.
+    opener: Callable[[], Popen[bytes] | None] | None = None
 
 
 def error_code(exc: Exception) -> str:
@@ -98,8 +122,10 @@ def error_code(exc: Exception) -> str:
     return InternalError.code
 
 
-def print_error(exc: Exception, *, json_mode: bool) -> None:
+def print_error(exc: Exception, *, json_mode: bool, no_color: bool = False) -> None:
     if not json_mode:
+        if render_error(str(exc), no_color=no_color):
+            return
         print(f"error: {exc}", file=sys.stderr)
         return
     detail: dict[str, object] = {"code": error_code(exc), "message": str(exc)}
@@ -110,6 +136,12 @@ def print_error(exc: Exception, *, json_mode: bool) -> None:
 
 class CliArgumentParser(argparse.ArgumentParser):
     json_errors = False
+
+    # argparse binds self.formatter_class from its __init__ parameter, so a
+    # class attribute would be shadowed everywhere it matters.
+    def __init__(self, *args, **kwargs) -> None:  # argparse itself is dynamically typed
+        kwargs.setdefault("formatter_class", _HELP_FORMATTER)
+        super().__init__(*args, **kwargs)
 
     def error(self, message: str) -> Never:
         if self.json_errors:
@@ -221,6 +253,11 @@ def build_parser() -> CliArgumentParser:
     parser.add_argument(
         "--pick-host", action="store_true", help="interactively choose an available target"
     )
+    parser.add_argument(
+        "--pick-hosts",
+        action="store_true",
+        help="with --export, ask which available target to use for each connection",
+    )
     parser.add_argument("--connect", action="store_true", help="run SSH directly")
     parser.add_argument(
         "--remote-command",
@@ -309,11 +346,12 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
             args.pick_host,
             args.plain,
             args.explain,
-            explicit_agent_socket is not None,
             args.ssh_args,
         )
     ):
         parser.error("--export cannot be combined with connection-only options")
+    if args.pick_hosts and not args.export:
+        parser.error("--pick-hosts requires --export")
     if args.host and args.pick_host:
         parser.error("--host and --pick-host are mutually exclusive")
     if args.connect and args.list:
@@ -357,6 +395,7 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
         agent_socket=args.agent_socket,
         host=args.host,
         pick_host=args.pick_host,
+        pick_hosts=args.pick_hosts,
         connect=args.connect,
         remote_command=args.remote_command,
         ssh_args=list(args.ssh_args),
@@ -384,6 +423,45 @@ def default_client(ptb: bool) -> object:
             "Could not reach the XPipe daemon; check that XPipe is running, unlocked, "
             f"and that Settings -> HTTP API is enabled: {exc}"
         ) from exc
+
+
+def may_offer_open(options: CliOptions) -> bool:
+    """Decide whether prompting to launch XPipe makes sense for this run.
+
+    JSON output must stay machine readable, and a plain ``xpipe open`` starts
+    the release build, so PTB builds and custom beacon ports must not be
+    offered it either; those users start their build manually.
+    """
+    if options.shell == "json":
+        return False
+    if options.ptb or os.environ.get("XPIPE_BEACON_PORT"):
+        return False
+    if not sys.stdin.isatty():
+        return False
+    # The prompt goes to stderr; if stderr is a pipe, it lands in a log file.
+    if not sys.stderr.isatty():
+        return False
+    # Never offer a launch we cannot perform.
+    return shutil.which("xpipe") is not None
+
+
+def connected_client(options: CliOptions, deps: AppDependencies) -> object:
+    if deps.client_factory is not None:
+        # Injected factories are trusted: no probe, no prompt, by design.
+        return deps.client_factory(options.ptb)
+    if may_offer_open(options):
+
+        def confirm() -> bool:
+            return confirm_open(no_color=options.no_color)
+    else:
+        confirm = None
+    return ensure_client(
+        ptb=options.ptb,
+        client_maker=default_client,
+        confirm=confirm,
+        opener=deps.opener,
+        no_color=options.no_color,
+    )
 
 
 def _execvpe(argv: list[str], env: dict[str, str]) -> None:
@@ -419,48 +497,70 @@ def prepare_command(client: object, options: CliOptions, deps: AppDependencies) 
             selected_host, available_hosts, no_color=options.no_color
         )
     command = build_ssh_argv(client, info, host_override=host_override, extra_argv=options.ssh_args)
-    if command.needs_password_manager_agent:
-        agent = deps.agent_resolver(
-            options.agent_socket,
-            provider=command.agent_provider,
-            identifier=command.agent_identifier,
-        )
-        if agent:
-            command.agent = agent
-            command.env["SSH_AUTH_SOCK"] = agent.path
-            if agent.identity_count == 0:
-                detail = f" ({agent.probe_error})" if agent.probe_error else ""
-                command.warnings.append(
-                    f"{agent.label} socket was found, but ssh-add reported no identities{detail}."
-                )
-        else:
-            command.warnings.append(
-                "This connection uses a password-manager SSH agent, but no matching usable agent socket was found. Pass --agent-socket PATH."
-            )
+    attach_agent(command, options.agent_socket, deps.agent_resolver)
     command.warnings = dedupe(command.warnings)
     return command
 
 
-def run_export(client: object, options: CliOptions, fmt: ExportFormat) -> int:
+def run_export(
+    client: object, options: CliOptions, fmt: ExportFormat, deps: AppDependencies
+) -> int:
     """Export every matching connection as one document or file."""
     infos = exportable_connections(client, name_pattern=store_filter(options.list_filter or ""))
-    result = collect_export(client, infos)
+    picker = None
+    if options.pick_hosts:
+
+        def picker(current: str | None, available: list[str]) -> str | None:
+            return choose_host_interactively(
+                current, available, no_color=options.no_color, flag_name="--pick-hosts"
+            )
+
+    stderr_rich = (
+        chrome_console(no_color=options.no_color, stderr=True) if options.shell != "json" else None
+    )
+
+    def collect() -> ExportResult:
+        return collect_export(
+            client,
+            infos,
+            agent_resolver=deps.agent_resolver,
+            agent_socket=options.agent_socket,
+            host_picker=picker,
+        )
+
+    if stderr_rich is not None and not options.pick_hosts:
+        # The user is away while the daemon is probed; menus would clash with
+        # a live spinner, so interactive runs get no spinner.
+        with stderr_rich.status("Exporting connections…", spinner="dots"):
+            result = collect()
+    else:
+        result = collect()
     if options.strict and result.warnings:
         raise StrictWarningsError(result.warnings)
-    for warning in result.warnings:
-        print(f"warning: {warning}", file=sys.stderr)
+    if stderr_rich is not None:
+        render_export_summary(result, fmt, no_color=options.no_color)
+    else:
+        for warning in result.warnings:
+            print(f"warning: {warning}", file=sys.stderr)
     document = render_export(result, fmt)
     if options.output and options.output != STDOUT_TARGET:
         target = Path(options.output)
         write_document(document, target, force=options.force)
-        print(f"wrote {target} ({len(result.hosts)} connection(s))", file=sys.stderr)
+        if stderr_rich is not None:
+            render_note(
+                f"✓ wrote {target} ({len(result.hosts)} connection(s))",
+                style="bold green",
+                no_color=options.no_color,
+            )
+        else:
+            print(f"wrote {target} ({len(result.hosts)} connection(s))", file=sys.stderr)
     else:
         sys.stdout.write(document)
     return 0
 
 
 def run(options: CliOptions, deps: AppDependencies) -> int:
-    client = (deps.client_factory or default_client)(options.ptb)
+    client = connected_client(options, deps)
     if options.list_mode:
         infos = exportable_connections(client, name_pattern=store_filter(options.list_filter or ""))
         render_list(
@@ -468,7 +568,7 @@ def run(options: CliOptions, deps: AppDependencies) -> int:
         )
         return 0
     if options.export:
-        return run_export(client, options, options.export)
+        return run_export(client, options, options.export, deps)
     command = prepare_command(client, options, deps)
     if options.strict and command.warnings:
         raise StrictWarningsError(command.warnings)
@@ -517,17 +617,17 @@ def main(argv: Sequence[str] | None = None, deps: AppDependencies | None = None)
     try:
         return run(options, deps or AppDependencies())
     except ExportError as exc:
-        print_error(exc, json_mode=options.shell == "json")
+        print_error(exc, json_mode=options.shell == "json", no_color=options.no_color)
         return exc.exit_code
     except OSError as exc:
-        print_error(exc, json_mode=options.shell == "json")
+        print_error(exc, json_mode=options.shell == "json", no_color=options.no_color)
         return LocalProcessError.exit_code
     except KeyboardInterrupt:
         # Ctrl-C at the interactive host menu is a normal user abort, not a defect.
         print("aborted", file=sys.stderr)
         return 130
     except Exception as exc:  # pragma: no cover - a final safety net for integration defects
-        print_error(exc, json_mode=options.shell == "json")
+        print_error(exc, json_mode=options.shell == "json", no_color=options.no_color)
         if options.debug:
             traceback.print_exc(file=sys.stderr)
         return InternalError.exit_code
