@@ -14,18 +14,6 @@ from pathlib import Path
 from subprocess import Popen
 from typing import Never, cast
 
-try:
-    from rich_argparse import RichHelpFormatter
-
-    class _HelpFormatter(RichHelpFormatter):
-        # Bracket-heavy help texts must not be parsed as console markup.
-        help_markup = False
-        text_markup = False
-
-    _HELP_FORMATTER: type[argparse.HelpFormatter] = _HelpFormatter
-except ImportError:  # pragma: no cover - exercised in minimal installations
-    _HELP_FORMATTER = argparse.HelpFormatter
-
 from . import __version__
 from .agents import attach_agent, resolve_agent_socket
 from .clipboard import copy_to_clipboard
@@ -74,6 +62,23 @@ from .xpipe import (
     selectable_texts,
     set_request_timeout,
 )
+
+_HELP_FORMATTER: type[argparse.HelpFormatter] = argparse.HelpFormatter
+if RICH_AVAILABLE:
+    # rich-argparse imports Rich lazily, so importing the formatter alone
+    # can succeed even when using it to render help would fail.
+    try:
+        from rich_argparse import RichHelpFormatter
+    except ImportError:
+        pass
+    else:
+
+        class _HelpFormatter(RichHelpFormatter):
+            # Bracket-heavy help texts must not be parsed as console markup.
+            help_markup = False
+            text_markup = False
+
+        _HELP_FORMATTER = _HelpFormatter
 
 
 @dataclass(frozen=True)

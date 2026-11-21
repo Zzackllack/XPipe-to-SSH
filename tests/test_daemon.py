@@ -17,7 +17,7 @@ from xpipe_to_ssh.daemon import (
     ensure_client,
 )
 from xpipe_to_ssh.errors import XPipeConnectionError
-from xpipe_to_ssh.presentation import confirm_open
+from xpipe_to_ssh.presentation import RICH_AVAILABLE, confirm_open
 
 
 @contextlib.contextmanager
@@ -171,9 +171,14 @@ class ConfirmOpenTests(unittest.TestCase):
         with fake_tty_stdin(""), contextlib.redirect_stderr(io.StringIO()):
             self.assertFalse(confirm_open())
 
+    @unittest.skipUnless(RICH_AVAILABLE, "requires Rich styling")
     def test_prompt_is_styled_on_a_tty(self) -> None:
         err = TtyStderr()
-        with fake_tty_stdin("y\n"), mock.patch("sys.stderr", err):
+        with (
+            fake_tty_stdin("y\n"),
+            mock.patch("sys.stderr", err),
+            mock.patch.dict(os.environ, {"TERM": "xterm-256color", "TTY_COMPATIBLE": "1"}),
+        ):
             self.assertTrue(confirm_open())
         rendered = err.getvalue()
         self.assertIn("xpipe open", rendered)

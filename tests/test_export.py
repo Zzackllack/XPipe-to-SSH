@@ -39,6 +39,7 @@ from xpipe_to_ssh.export import (
     write_document,
 )
 from xpipe_to_ssh.models import AgentSocket, SSHCommand
+from xpipe_to_ssh.presentation import RICH_AVAILABLE
 
 FORWARD_TARGET = "[%h]:%p" if os.name == "nt" else "'[%h]:%p'"
 
@@ -993,6 +994,7 @@ class AgentExportTests(unittest.TestCase):
 
 
 class ExportTuiTests(unittest.TestCase):
+    @unittest.skipUnless(RICH_AVAILABLE, "requires Rich summary")
     def test_pretty_export_renders_a_summary_on_a_tty(self) -> None:
         client = sample_client()
         out, err = io.StringIO(), TtyStderr()
@@ -1013,6 +1015,7 @@ class ExportTuiTests(unittest.TestCase):
         # The document itself stays untouched on stdout.
         self.assertIn("Host default/alpha", out.getvalue())
 
+    @unittest.skipUnless(RICH_AVAILABLE, "requires Rich summary")
     def test_pretty_export_lists_skipped_connections_in_their_own_panel(self) -> None:
         broken = ssh_info("bad", "default", "bad", host="bad host")
         client = MultiClient([broken, ssh_info("good", "default", "good")])
@@ -1029,6 +1032,7 @@ class ExportTuiTests(unittest.TestCase):
         self.assertIn("default/bad", rendered)
         self.assertIn("default/good", rendered)
 
+    @unittest.skipUnless(RICH_AVAILABLE, "requires Rich summary")
     def test_pretty_export_shows_the_agent_provider_per_connection(self) -> None:
         client = MultiClient([agent_info("a", "default", "alpha")])
         out, err = io.StringIO(), TtyStderr()
@@ -1092,7 +1096,7 @@ class ExportTuiTests(unittest.TestCase):
             )
 
         self.assertEqual(result, 0)
-        self.assertIn("Exported (4)", err.getvalue())
+        self.assertEqual("Exported (4)" in err.getvalue(), RICH_AVAILABLE)
         self.assertEqual(json.loads(out.getvalue())["schemaVersion"], 1)
 
     def test_plain_output_is_unchanged_when_stderr_is_not_a_tty(self) -> None:
@@ -1269,11 +1273,11 @@ class PickHostsExportTests(unittest.TestCase):
         self.assertNotIn("no matching usable agent socket", err.getvalue())
         self.assertNotIn("IdentityAgent", out.getvalue())
 
+    @unittest.skipUnless(RICH_AVAILABLE, "requires Rich summary")
     def test_pretty_skipped_panel_handles_quotes_in_connection_names(self) -> None:
         client = MultiClient([ssh_info("bad", "default", "b'a'd", host="bad host")])
         out, err = io.StringIO(), TtyStderr()
         with (
-            mock.patch("xpipe_to_ssh.presentation.RICH_AVAILABLE", True),
             contextlib.redirect_stdout(out),
             mock.patch("sys.stderr", err),
         ):

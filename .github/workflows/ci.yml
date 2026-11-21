@@ -62,4 +62,6 @@ jobs:
       - name: Install dependencies without rich
         run: uv sync --locked --no-group dev && uv pip uninstall rich
       - name: Test
-        run: uv run python -m unittest discover -v
+        run: |
+          uv run --no-sync python -c "from importlib.util import find_spec; assert find_spec('rich') is None"
+          uv run --no-sync python -m unittest discover -v
