@@ -2,7 +2,12 @@
 
 import contextlib
 import io
+import json
 import os
+import shutil
+import subprocess
+import sys
+import sysconfig
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,6 +46,27 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaises(ConfigError) as caught:
             load_settings(path)
         self.assertIn(str(path), str(caught.exception))
+
+    def test_installed_console_reports_malformed_toml_as_json(self) -> None:
+        path = self.write("shell = \n")
+        scripts = sysconfig.get_path("scripts")
+        command = shutil.which("xpipe-to-ssh", path=scripts)
+        if command is None:
+            self.skipTest(f"xpipe-to-ssh is not installed alongside {sys.executable}")
+        result = subprocess.run(
+            [command, "--shell", "json", "--list"],
+            env={**os.environ, "XPIPE_TO_SSH_CONFIG": str(path)},
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["schemaVersion"], 1)
+        self.assertEqual(payload["error"]["code"], "invalid_configuration")
+        self.assertIn(str(path), payload["error"]["message"])
 
     def test_unknown_key_is_a_reported_typo(self) -> None:
         path = self.write('shell = "posix"\nagent-socket = "none"\n')

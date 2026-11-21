@@ -33,6 +33,7 @@ from .config import load_settings
 from .daemon import ensure_client
 from .errors import (
     EXIT_OK,
+    ConfigError,
     ExecutionError,
     ExportError,
     InternalError,
@@ -310,7 +311,13 @@ def parse_options(argv: Sequence[str] | None = None) -> tuple[CliArgumentParser,
     # configured agent socket is a standing default, not a request to connect.
     explicit_agent_socket = args.agent_socket
     # The resolved value is authoritative for the validation errors below.
-    args = resolve_settings(args, parser)
+    try:
+        args = resolve_settings(args, parser)
+    except ConfigError as exc:
+        # The file couldn't supply a default, but the flag and environment still can.
+        shell = args.shell or os.environ.get(SHELL_ENV)
+        print_error(exc, json_mode=shell == "json", no_color=args.no_color)
+        raise SystemExit(exc.exit_code) from exc
     parser.json_errors = args.shell == "json"
     if args.list and args.connection:
         parser.error("--list cannot be combined with a connection")

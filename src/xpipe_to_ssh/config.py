@@ -73,12 +73,14 @@ def _coerce(key: str, kind: type, value: object) -> Any:
 def load_settings(path: Path | None = None) -> Settings:
     """Read the configuration file, ignoring a missing one."""
     target = config_path() if path is None else path
-    if target is None or not target.exists():
+    if target is None:
         return Settings()
     try:
         with target.open("rb") as handle:
             document = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except FileNotFoundError:
+        return Settings()
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         raise ConfigError(f"Could not read {target}: {exc}") from exc
 
     unknown = sorted(set(document) - set(SETTING_TYPES))
