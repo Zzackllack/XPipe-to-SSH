@@ -1,3 +1,4 @@
+import shlex
 import unittest
 
 from xpipe_to_ssh.errors import ExportError
@@ -150,7 +151,16 @@ class CompatibilityTests(unittest.TestCase):
 
         self.assertEqual(command.connection_id, "target")
         self.assertEqual(command.gateway_names, ["default/gateway"])
-        self.assertIn("ProxyCommand=ssh -W %h:%p gateway.example", command.argv)
+        proxy = next(arg for arg in command.argv if arg.startswith("ProxyCommand="))
+        self.assertEqual(
+            shlex.split(proxy.removeprefix("ProxyCommand=")),
+            [
+                "ssh",
+                "-W",
+                "[%h]:%p",
+                "gateway.example",
+            ],
+        )
 
     def test_v24_ssh_config_alias_uses_host_entry_name(self) -> None:
         info: WireRecord = {

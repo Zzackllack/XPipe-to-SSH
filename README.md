@@ -199,15 +199,17 @@ exit code 2 and writes no file; the document is never half-written.
 
 `--output PATH` writes the document to a file instead of stdout; `-` means
 stdout. An existing file is never overwritten unless `--force` is given, and a
-new file is written to a temporary name and moved into place with mode `0600`,
-because it can name key files and carry a `ProxyCommand`.
+complete export is published atomically. On POSIX, the export has mode `0600`.
+On Windows, the staged file and published export inherit access permissions
+from the output directory. Use a directory with a restrictive ACL if other
+accounts should be unable to read the export.
 
 XPipe stores of type `sshConfigHost` already resolve through `~/.ssh/config`,
 so they are skipped with a warning rather than re-exported as a self-reference.
 A connection with unusable data is skipped and reported as a warning, so one
 broken store cannot sink the whole export; `--strict` turns any warning into a
-failure. No password, passphrase, or decrypted identity payload is ever
-written.
+failure. If an XPipe request exceeds its deadline, the export stops before
+publication. No password, passphrase, or decrypted identity payload is ever written.
 
 ## Authentication and agents
 

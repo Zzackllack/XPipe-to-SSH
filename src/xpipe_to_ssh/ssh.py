@@ -25,7 +25,21 @@ from .xpipe import (
 
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 OPTION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
-COMMAND_OPTIONS = {"proxycommand", "localcommand", "match", "include"}
+#: Directives that can run commands or enable execution through another setting.
+COMMAND_OPTIONS = {
+    "proxycommand",
+    "localcommand",
+    "knownhostscommand",
+    "remotecommand",
+    "permitlocalcommand",
+    "xauthlocation",
+    "match",
+    "include",
+}
+#: Directives that load a local provider library.
+PROVIDER_OPTIONS = {"pkcs11provider", "securitykeyprovider"}
+
+GATEWAY_FORWARD_TARGET = "[%h]:%p"  # Brackets also delimit IPv6 addresses.
 
 #: A port is 1-65535, so five significant digits is the most that can be valid.
 MAX_PORT_DIGITS = 5
@@ -195,15 +209,22 @@ def parse_additional_options(raw: object) -> tuple[list[str], list[str]]:
             continue
         if CONTROL_RE.search(line):
             raise ExportError("SSH additional option contains control characters")
-        key = line.split("=", 1)[0].split(None, 1)[0]
+        key = re.split(r"[=\s]", line, maxsplit=1)[0]
         if not OPTION_RE.fullmatch(key):
             raise ExportError(f"Invalid SSH additional option: {brief(line)}")
         if "=" not in line and not re.search(r"\s", line):
             raise ExportError(f"SSH additional option needs a value: {brief(line)}")
         result += ["-o", line]
-        if key.casefold() in COMMAND_OPTIONS:
+        normalized = key.casefold()
+        if normalized in COMMAND_OPTIONS:
             warnings.append(
-                f"SSH option {key} can execute local commands; inspect the generated command before use."
+                f"SSH option {key} can execute commands or load extra configuration; "
+                "inspect the generated command before use."
+            )
+        elif normalized in PROVIDER_OPTIONS:
+            warnings.append(
+                f"SSH option {key} loads a local provider library; "
+                "inspect the generated command before use."
             )
     return result, warnings
 
@@ -296,7 +317,7 @@ def build_ssh_argv(
     argv += gateway.argv
     sources += gateway.sources
     if proxy_mode:
-        argv += ["-W", "%h:%p"]
+        argv += ["-W", GATEWAY_FORWARD_TARGET]
         sources += [GATEWAY_FORWARDING, GATEWAY_FORWARDING]
     if extra_argv:
         # Not validated against the ssh option grammar: ssh itself is the
@@ -386,10 +407,14 @@ def plan_gateway(
             "one SSH_AUTH_SOCK may not authenticate both hops."
         )
     warnings.extend(gateway_command.warnings)
+    # OpenSSH expands percent tokens across the entire ProxyCommand. Preserve
+    # this hop's arguments (including deeper ProxyCommands) for the next ssh
+    # process. The penultimate argument is the generated -W target, which the
+    # parent must expand using its own host and port.
+    proxy_argv = [argument.replace("%", "%%") for argument in gateway_command.argv]
+    proxy_argv[-2] = GATEWAY_FORWARD_TARGET
     nested = (
-        windows_join(gateway_command.argv)
-        if (platform_name or os.name) == "nt"
-        else shlex.join(gateway_command.argv)
+        windows_join(proxy_argv) if (platform_name or os.name) == "nt" else shlex.join(proxy_argv)
     )
     hop = f"XPipe gateway {gateway_command.connection_name}"
     return GatewayPlan(
@@ -424,7 +449,7 @@ def ssh_config_command(
     argv = ["ssh"]
     sources = [SSH_EXECUTABLE]
     if proxy_mode:
-        argv += ["-W", "%h:%p"]
+        argv += ["-W", GATEWAY_FORWARD_TARGET]
         sources += [GATEWAY_FORWARDING, GATEWAY_FORWARDING]
     argv.append(alias)
     sources.append("XPipe ssh config alias")

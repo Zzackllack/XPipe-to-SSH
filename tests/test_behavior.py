@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import shlex
 import sys
 import tempfile
 import unittest
@@ -25,6 +26,7 @@ from xpipe_to_ssh.selection import choose_connection, decode_identity_data
 from xpipe_to_ssh.ssh import (
     build_ssh_argv,
     identity_options,
+    parse_additional_options,
     parse_bool,
     parse_port,
     validate_destination,
@@ -75,6 +77,30 @@ def direct_info(**config: object) -> dict[str, object]:
     }
     raw.update(config)
     return {"store": "store-id", "type": "ssh", "name": ["default", "test"], "rawData": raw}
+
+
+def proxy_option_value(argv: list[str]) -> str:
+    """Return the value of the generated ``-o ProxyCommand=...`` argument."""
+    for argument in argv:
+        if argument.startswith("ProxyCommand="):
+            return argument.partition("=")[2]
+    raise AssertionError(f"no ProxyCommand in {argv!r}")
+
+
+def option_value(argv: list[str], flag: str) -> str:
+    return argv[argv.index(flag) + 1]
+
+
+def expand_proxy_tokens(command: str, host: str, port: int) -> str:
+    """Apply the one OpenSSH token expansion a parent performs on ProxyCommand.
+
+    Only the tokens the generated commands use are modelled: ``%%`` becomes a
+    literal percent, while ``%h``/``%p`` become the parent's target host/port.
+    """
+    sentinel = "\x00"
+    expanded = command.replace("%%", sentinel)
+    expanded = expanded.replace("%h", host).replace("%p", str(port))
+    return expanded.replace(sentinel, "%")
 
 
 class SingleClient:
@@ -488,6 +514,149 @@ class BehaviorTests(unittest.TestCase):
         posix_proxy = next(v for v in posix.argv if v.startswith("ProxyCommand="))
         self.assertIn('"UserKnownHostsFile=my hosts"', windows_proxy)
         self.assertIn("'UserKnownHostsFile=my hosts'", posix_proxy)
+
+    def test_nested_gateways_keep_each_hops_percent_tokens(self) -> None:
+        # The outer ssh expands the first ProxyCommand with the target address.
+        # That must not consume the second hop's %h/%p, which belong to the
+        # gateway ssh process one level in.
+        second: WireRecord = {
+            "store": "second",
+            "type": "ssh",
+            "name": ["default", "second"],
+            "rawData": {"type": "ssh", "host": "second.example", "port": 2202},
+        }
+        first: WireRecord = {
+            "store": "first",
+            "type": "ssh",
+            "name": ["default", "first"],
+            "rawData": {
+                "type": "ssh",
+                "host": "first.example",
+                "port": 2201,
+                "gateway": "second",
+                "additionalOptions": "UserKnownHostsFile=/keys/%h",
+            },
+        }
+        target = direct_info(gateway="first")
+
+        class ChainClient(SingleClient):
+            def store_info(self, refs: list[str]) -> list[dict[str, object]]:
+                records = {"first": first, "second": second, "store-id": target}
+                return [{**records[ref], "store": ref} for ref in refs]
+
+        command = build_ssh_argv(ChainClient(), target)
+        outer = proxy_option_value(command.argv)
+
+        # One escape so the outer ssh hands a literal token to the gateway.
+        self.assertIn("[%%h]:%%p", outer)
+
+        hop_one = shlex.split(expand_proxy_tokens(outer, "example.test", 22))
+        self.assertEqual(hop_one[-1], "first.example")
+        self.assertEqual(option_value(hop_one, "-p"), "2201")
+        self.assertEqual(option_value(hop_one, "-W"), "[example.test]:22")
+        self.assertIn("UserKnownHostsFile=/keys/%h", hop_one)
+
+        hop_two = shlex.split(
+            expand_proxy_tokens(proxy_option_value(hop_one), "first.example", 2201)
+        )
+        self.assertEqual(hop_two[-1], "second.example")
+        self.assertEqual(option_value(hop_two, "-p"), "2202")
+        self.assertEqual(option_value(hop_two, "-W"), "[first.example]:2201")
+        self.assertFalse(any(arg.startswith("ProxyCommand=") for arg in hop_two))
+
+    def test_ipv6_target_is_bracketed_in_the_hop_forwarding_argument(self) -> None:
+        gateway: WireRecord = {
+            "store": "gateway",
+            "type": "ssh",
+            "name": ["default", "gateway"],
+            "rawData": {"type": "ssh", "host": "gateway.example", "port": 2201},
+        }
+        target = direct_info(host="[2001:db8::10]", port=2222, gateway="gateway")
+
+        class GatewayClient(SingleClient):
+            def store_info(self, refs: list[str]) -> list[dict[str, object]]:
+                return [gateway]
+
+        command = build_ssh_argv(GatewayClient(), target)
+        self.assertEqual(command.argv[-1], "2001:db8::10")
+
+        hop = shlex.split(
+            expand_proxy_tokens(proxy_option_value(command.argv), "2001:db8::10", 2222)
+        )
+        self.assertEqual(option_value(hop, "-W"), "[2001:db8::10]:2222")
+
+    def test_ssh_config_alias_gateway_gets_bracketed_forwarding(self) -> None:
+        cfg_gateway: WireRecord = {
+            "store": "cfg",
+            "type": "sshConfigHost",
+            "name": ["default", "jump"],
+            "rawData": {"type": "sshConfigHost", "alias": "jump"},
+        }
+        target = direct_info(gateway="cfg")
+
+        class GatewayClient(SingleClient):
+            def store_info(self, refs: list[str]) -> list[dict[str, object]]:
+                return [cfg_gateway]
+
+        command = build_ssh_argv(GatewayClient(), target)
+        hop = shlex.split(expand_proxy_tokens(proxy_option_value(command.argv), "example.test", 22))
+
+        self.assertEqual(hop, ["ssh", "-W", "[example.test]:22", "jump"])
+        self.assertEqual(command.gateway_names, ["default/jump"])
+
+    def test_known_hosts_command_warns_in_permissive_mode(self) -> None:
+        command = build_ssh_argv(
+            SingleClient(), direct_info(additionalOptions="KnownHostsCommand=/bin/true")
+        )
+
+        self.assertIn("-o", command.argv)
+        self.assertIn("KnownHostsCommand=/bin/true", command.argv)
+        self.assertTrue(
+            any(
+                "KnownHostsCommand" in warning and "execute" in warning
+                for warning in command.warnings
+            )
+        )
+
+    def test_provider_loading_options_warn_in_permissive_mode(self) -> None:
+        for option in (
+            "PKCS11Provider=/usr/lib/libpkcs11.so",
+            "SecurityKeyProvider=/usr/lib/libsk.so",
+        ):
+            with self.subTest(option=option):
+                argv, warnings = parse_additional_options(option)
+
+                self.assertEqual(argv, ["-o", option])
+                self.assertTrue(any("provider library" in warning for warning in warnings))
+
+    def test_strict_mode_rejects_known_hosts_command_before_exec(self) -> None:
+        info = direct_info(additionalOptions="KnownHostsCommand=/bin/true")
+        executed: list[list[str]] = []
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = main(
+                ["test", "--connect", "--strict"],
+                AppDependencies(
+                    client_factory=lambda _: SingleClient(info),
+                    executor=lambda argv, _env: executed.append(argv),
+                ),
+            )
+
+        self.assertEqual(result, 2)
+        self.assertEqual(executed, [])
+        self.assertIn("KnownHostsCommand", stderr.getvalue())
+
+    def test_other_command_options_warn_in_permissive_mode(self) -> None:
+        for option in (
+            "RemoteCommand=true",
+            "XAuthLocation=/usr/bin/xauth",
+            "PermitLocalCommand=yes",
+        ):
+            with self.subTest(option=option):
+                argv, warnings = parse_additional_options(option)
+
+                self.assertEqual(argv, ["-o", option])
+                self.assertEqual(len(warnings), 1)
 
     def test_untrusted_input_in_errors_is_bounded(self) -> None:
         huge = "9" * 5000

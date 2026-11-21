@@ -10,7 +10,7 @@ from queue import Empty, Queue
 from threading import Thread
 from typing import cast
 
-from .errors import XPipeConnectionError, XPipeSchemaError
+from .errors import XPipeConnectionError, XPipeSchemaError, XPipeTimeoutError
 
 WireRecord = dict[str, object]
 
@@ -108,6 +108,8 @@ class XPipeAdapter:
                 refs = self._call(method, categories="**", stores=stores, types=types)
             else:
                 refs = self._call(method, connections=stores, types=types)
+        except XPipeTimeoutError:
+            raise
         except Exception as exc:
             raise XPipeConnectionError(f"XPipe query failed: {exc}") from exc
 
@@ -125,6 +127,8 @@ class XPipeAdapter:
             raise XPipeSchemaError("Installed xpipe-api cannot decrypt identity metadata")
         try:
             return self._call(method, encrypted)
+        except XPipeTimeoutError:
+            raise
         except Exception as exc:
             raise XPipeConnectionError(f"XPipe identity decryption failed: {exc}") from exc
 
@@ -132,6 +136,8 @@ class XPipeAdapter:
         method = self._method(self.family[2])
         try:
             values = self._call(method, identifiers)
+        except XPipeTimeoutError:
+            raise
         except Exception as exc:
             raise XPipeConnectionError(f"XPipe store lookup failed: {exc}") from exc
         if not isinstance(values, list):
@@ -174,7 +180,7 @@ class XPipeAdapter:
         try:
             succeeded, value = result.get(timeout=self.timeout)
         except Empty as exc:
-            raise XPipeConnectionError(
+            raise XPipeTimeoutError(
                 f"XPipe request timed out after {self.timeout:g} seconds"
             ) from exc
         if not succeeded:

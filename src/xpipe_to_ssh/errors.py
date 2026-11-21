@@ -39,6 +39,10 @@ class XPipeConnectionError(XPipeError):
     code = "xpipe_request_failed"
 
 
+class XPipeTimeoutError(XPipeConnectionError):
+    """A request exceeded the CLI deadline and may still be running."""
+
+
 class XPipeSchemaError(XPipeError):
     """XPipe returned a response that did not match a known shape."""
 

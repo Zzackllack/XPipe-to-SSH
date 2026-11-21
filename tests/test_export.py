@@ -4,15 +4,23 @@ import contextlib
 import io
 import json
 import os
+import shlex
+import shutil
 import stat
+import subprocess
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 from unittest import mock
 
 import yaml
 
 from tests.test_daemon import TtyStderr, fake_tty_stdin
+from xpipe_to_ssh import xpipe
 from xpipe_to_ssh.cli import AppDependencies, main
 from xpipe_to_ssh.errors import ExportOutputError, InternalError, XPipeError
 from xpipe_to_ssh.export import (
@@ -31,6 +39,8 @@ from xpipe_to_ssh.export import (
     write_document,
 )
 from xpipe_to_ssh.models import AgentSocket, SSHCommand
+
+FORWARD_TARGET = "[%h]:%p" if os.name == "nt" else "'[%h]:%p'"
 
 
 def ssh_info(store: str, *name: str, **raw: object) -> dict[str, object]:
@@ -124,6 +134,7 @@ class NamingTests(unittest.TestCase):
         self.assertEqual(sanitize_alias("default/nas ds"), "default/nas-ds")
         self.assertEqual(sanitize_alias("**oracle*"), "oracle")
         self.assertEqual(sanitize_alias("a  b/c"), "a-b/c")
+        self.assertEqual(sanitize_alias("ops@stage"), "ops-stage")
         self.assertEqual(sanitize_alias("   "), "xpipe")
 
     def test_inventory_names_drop_the_path_separator(self) -> None:
@@ -144,6 +155,30 @@ class NamingTests(unittest.TestCase):
         self.assertEqual(
             [host.alias for host in exported_hosts(client)], ["default/a-b", "default/a-b-2"]
         )
+
+    def test_aliases_reserve_names_with_existing_suffixes_in_every_format(self) -> None:
+        for names in (("a b", "a-b", "a-b-2"), ("a b", "a/b", "a-b-2")):
+            with self.subTest(names=names):
+                client = MultiClient(
+                    [
+                        ssh_info(str(i), name, host=f"host-{i}.example")
+                        for i, name in enumerate(names)
+                    ]
+                )
+                result = collect_export(client, list(client.records.values()))
+                expected_hosts = {f"host-{i}.example" for i in range(len(names))}
+                for fmt in ("yaml", "json"):
+                    document = yaml.safe_load(render_export(result, fmt))
+                    self.assertEqual(len({host["alias"] for host in document["hosts"]}), 3)
+                    self.assertEqual(
+                        {host["hostname"] for host in document["hosts"]}, expected_hosts
+                    )
+
+                inventory = yaml.safe_load(render_export(result, "ansible"))["all"]["hosts"]
+                self.assertEqual(
+                    {name: host["ansible_host"] for name, host in inventory.items()},
+                    {"a-b": "host-0.example", "a-b-3": "host-1.example", "a-b-2": "host-2.example"},
+                )
 
 
 class CommandFieldsTests(unittest.TestCase):
@@ -187,6 +222,77 @@ class CommandFieldsTests(unittest.TestCase):
 
 
 class SerializerTests(unittest.TestCase):
+    def parse_ssh_config(self, config: Path, alias: str) -> str:
+        ssh = shutil.which("ssh")
+        if ssh is None:
+            self.skipTest("OpenSSH is not installed")
+        result = subprocess.run(
+            [ssh, "-G", "-F", str(config), alias],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_ssh_config_names_never_add_physical_lines(self) -> None:
+        client = MultiClient([ssh_info("a", "dev\nlab", host="lab.example")])
+        text = render_export(ExportResult(hosts=exported_hosts(client)), "ssh-config")
+
+        self.assertEqual(
+            [line for line in text.splitlines() if line and not line.startswith("#")],
+            ["Host dev-lab", "    HostName lab.example", "    User alice"],
+        )
+
+    def test_ssh_config_resolves_colliding_aliases_to_distinct_hosts(self) -> None:
+        client = MultiClient(
+            [
+                ssh_info("1", "a b", host="first.example"),
+                ssh_info("2", "A-B", host="second.example"),
+                ssh_info("3", "a-b-2", host="third.example"),
+            ]
+        )
+        result = ExportResult(hosts=exported_hosts(client))
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "ssh_config"
+            write_document(render_export(result, "ssh-config"), config, force=False)
+            for alias, hostname in (
+                ("a-b", "first.example"),
+                ("A-B-3", "second.example"),
+                ("a-b-2", "third.example"),
+            ):
+                with self.subTest(alias=alias):
+                    self.assertIn(
+                        f"hostname {hostname}", self.parse_ssh_config(config, alias).splitlines()
+                    )
+
+    def test_ssh_config_preserves_a_spaced_identity_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "ssh_config"
+            key = (Path(directory) / "my keys" / "id_ed25519").as_posix()
+            client = MultiClient(
+                [
+                    ssh_info(
+                        "a",
+                        "office",
+                        identity={
+                            "type": "inPlace",
+                            "identityStore": {
+                                "type": "localIdentity",
+                                "username": "alice",
+                                "sshIdentity": {"type": "file", "file": key},
+                            },
+                        },
+                    )
+                ]
+            )
+            result = ExportResult(hosts=exported_hosts(client))
+            write_document(render_export(result, "ssh-config"), config, force=False)
+
+            self.assertIn(
+                f"identityfile {key}", self.parse_ssh_config(config, "office").splitlines()
+            )
+
     def test_ssh_config_blocks_carry_hostname_user_port_and_identity(self) -> None:
         client = MultiClient(
             [
@@ -346,7 +452,7 @@ class SerializerTests(unittest.TestCase):
         # shadow that block's directives for every caller.
         routed = ssh_info("web", "default", "web", host="web.example", gateway="gw")
         gateway = ssh_info("gw", "default", "jump", "box", host="gw.example")
-        clone = ssh_info("clone", "gw.example", host="192.0.2.1")
+        clone = ssh_info("clone", "GW.example", host="192.0.2.1")
         client = MultiClient([gateway, routed, clone])
 
         result = collect_export(client, list(client.records.values()))
@@ -356,7 +462,7 @@ class SerializerTests(unittest.TestCase):
         )
         text = render_export(ExportResult(hosts=result.hosts), "ssh-config")
         self.assertNotIn("Host default/jump/box gw.example", text)
-        self.assertIn("Host gw.example\n", text)
+        self.assertIn("Host GW.example\n", text)
 
     def test_gateway_extension_stays_silent_for_an_ssh_config_host(self) -> None:
         cfg_host = config_host_info("cfg", "local machine", "jump", alias="jump")
@@ -370,7 +476,7 @@ class SerializerTests(unittest.TestCase):
     def test_ssh_config_includes_gateway_forwarding_and_extra_options(self) -> None:
         text = render_export(ExportResult(hosts=exported_hosts(sample_client())), "ssh-config")
 
-        self.assertIn("ProxyCommand ssh -l alice -W %h:%p gw.example", text)
+        self.assertIn(f"ProxyCommand ssh -l alice -W {FORWARD_TARGET} gw.example", text)
         self.assertIn("    ForwardX11 yes", text)
         self.assertIn("    UserKnownHostsFile /tmp/known_hosts", text)
 
@@ -385,7 +491,7 @@ class SerializerTests(unittest.TestCase):
         routed = next(host for host in document["hosts"] if host["alias"] == "default/routed")
         self.assertEqual(routed["hostname"], "routed.example")
         self.assertEqual(routed["port"], 2222)
-        self.assertEqual(routed["proxyCommand"], "ssh -l alice -W %h:%p gw.example")
+        self.assertEqual(routed["proxyCommand"], f"ssh -l alice -W {FORWARD_TARGET} gw.example")
         self.assertTrue(routed["forwardX11"])
         self.assertEqual(routed["options"], {"UserKnownHostsFile": "/tmp/known_hosts"})
 
@@ -412,8 +518,16 @@ class SerializerTests(unittest.TestCase):
         document = ansible_document(exported_hosts(sample_client()))
 
         routed = document["all"]["hosts"]["default-routed"]
-        self.assertIn(
-            "'ProxyCommand=ssh -l alice -W %h:%p gw.example'", routed["ansible_ssh_common_args"]
+        self.assertEqual(
+            shlex.split(routed["ansible_ssh_common_args"]),
+            [
+                "-o",
+                f"ProxyCommand=ssh -l alice -W {FORWARD_TARGET} gw.example",
+                "-o",
+                "UserKnownHostsFile=/tmp/known_hosts",
+                "-o",
+                "ForwardX11=yes",
+            ],
         )
 
     def test_empty_export_still_produces_a_valid_document(self) -> None:
@@ -448,15 +562,59 @@ class CliExportTests(unittest.TestCase):
 
     def test_one_broken_connection_is_skipped_not_fatal(self) -> None:
         broken = ssh_info("bad", "default", "bad", host="bad host")
+        missing_option = ssh_info("option", "default", "option", additionalOptions="=value")
         good = ssh_info("good", "default", "good")
-        client = MultiClient([broken, good])
+        client = MultiClient([broken, missing_option, good])
 
         result, out, err = run_export(["--export", "ssh-config"], client)
 
         self.assertEqual(result, 0)
-        self.assertIn("# XPipe connection: default/good", out)
+        self.assertIn("Host default/good\n", out)
         self.assertNotIn("default/bad", out)
         self.assertIn("Skipped 'default/bad'", err)
+        self.assertIn("Skipped 'default/option'", err)
+
+    def test_daemon_deadline_aborts_export_after_one_stalled_worker(self) -> None:
+        release = threading.Event()
+        workers: list[threading.Thread] = []
+
+        class StalledGatewayClient(MultiClient):
+            def store_info(self, refs: list[str]) -> list[dict[str, object]]:
+                if refs == ["gateway"]:
+                    workers.append(threading.current_thread())
+                    release.wait()
+                return super().store_info(refs)
+
+        client = StalledGatewayClient(
+            [ssh_info(str(i), f"store-{i:02}", gateway="gateway") for i in range(20)]
+            + [ssh_info("gateway", "zz-gateway")]
+        )
+        try:
+            with (
+                tempfile.TemporaryDirectory() as directory,
+                mock.patch.dict(os.environ, {xpipe.TIMEOUT_ENV: "0.05"}),
+                mock.patch.object(xpipe, "_timeout_override", None),
+            ):
+                target = Path(directory) / "hosts.json"
+                start = time.monotonic()
+                result, out, err = run_export(
+                    ["--export", "json", "--shell", "json", "--output", str(target)], client
+                )
+                elapsed = time.monotonic() - start
+
+                self.assertEqual(len(workers), 1)
+                self.assertTrue(workers[0].is_alive())
+                self.assertLess(elapsed, 1.0)
+                self.assertEqual(result, 1)
+                self.assertEqual(err, "")
+                error = json.loads(out)["error"]
+                self.assertEqual(error["code"], "xpipe_request_failed")
+                self.assertIn("timed out", error["message"])
+                self.assertFalse(target.exists())
+        finally:
+            release.set()
+            for worker in workers:
+                worker.join(timeout=1)
 
     def test_strict_export_fails_and_json_error_is_machine_readable(self) -> None:
         broken = ssh_info("bad", "default", "bad", host="bad host")
@@ -468,6 +626,22 @@ class CliExportTests(unittest.TestCase):
 
         self.assertEqual(result, 2)
         self.assertEqual(json.loads(out)["error"]["code"], "strict_warnings")
+
+    def test_strict_export_rejects_known_hosts_command_before_writing(self) -> None:
+        client = MultiClient([ssh_info("a", "alpha", additionalOptions="KnownHostsCommand=true")])
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "ssh_config"
+            result, out, err = run_export(
+                ["--export", "ssh-config", "--strict", "--shell", "json", "--output", str(target)],
+                client,
+            )
+
+            self.assertEqual(result, 2)
+            self.assertEqual(err, "")
+            error = json.loads(out)["error"]
+            self.assertEqual(error["code"], "strict_warnings")
+            self.assertIn("KnownHostsCommand", error["warnings"][0])
+            self.assertFalse(target.exists())
 
     def test_filter_is_applied_at_the_daemon_for_export(self) -> None:
         client = sample_client()
@@ -576,6 +750,39 @@ class OutputFileTests(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertEqual(target.read_text(), "keep me")
             self.assertIn("--force", err)
+
+    def test_two_writers_publish_exactly_one_complete_export_without_force(self) -> None:
+        documents = [
+            render_export(
+                ExportResult(hosts=exported_hosts(MultiClient([ssh_info(name, name)]))), "json"
+            )
+            for name in ("first", "second")
+        ]
+        barrier = Barrier(2, timeout=5)
+        mkstemp = tempfile.mkstemp
+
+        def synchronized_mkstemp(*, dir: str, prefix: str, suffix: str) -> tuple[int, str]:
+            # Both writers have entered staging before either can publish.
+            barrier.wait()
+            return mkstemp(dir=dir, prefix=prefix, suffix=suffix)
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "hosts.json"
+            with (
+                mock.patch("xpipe_to_ssh.export.tempfile.mkstemp", synchronized_mkstemp),
+                ThreadPoolExecutor(max_workers=2) as pool,
+            ):
+                futures = [
+                    pool.submit(write_document, document, target, force=False)
+                    for document in documents
+                ]
+            outcomes = [future.exception() for future in futures]
+            self.assertEqual(outcomes.count(None), 1)
+            failure = next(outcome for outcome in outcomes if outcome is not None)
+            self.assertIsInstance(failure, ExportOutputError)
+            self.assertIn("--force", str(failure))
+            self.assertEqual(target.read_text(encoding="utf-8"), documents[outcomes.index(None)])
+            self.assertEqual(list(target.parent.iterdir()), [target])
 
     def test_force_overwrites(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
